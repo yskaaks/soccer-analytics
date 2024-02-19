@@ -1,11 +1,24 @@
-
-
 from ultralytics import YOLO
 import cv2
 from tqdm import tqdm
 import numpy as np
 import os
 import json
+
+from utils import homography_transformation_process, apply_homography_to_point
+
+# Homography computation ------------------------------------------------------
+class HomographyState:
+    def __init__(self, guess_fx, guess_rot, guess_trans):
+        self.guess_fx = guess_fx
+        self.guess_rot = guess_rot
+        self.guess_trans = guess_trans
+
+    def update_state(self, guess_fx, guess_rot, guess_trans):
+        self.guess_fx = guess_fx
+        self.guess_rot = guess_rot
+        self.guess_trans = guess_trans
+
 
 # Color segmentation code -----------------------------------------------------
 def save_hsv_ranges(hsv_ranges, file_path):
@@ -139,6 +152,10 @@ class DetectedObject:
     def __init__(self, bbox, obj_id):
         self.bbox = bbox
         self.id = obj_id
+        self.point_2d = None
+    def get_bbox_bottom(self):
+        xmin, ymin, xmax, ymax = self.bbox
+        return np.array([int((xmin + xmax) / 2), int(ymax)])
         
 class DetectionProcessor:
     def __init__(self, model_path, classes_hsv_ranges):
@@ -240,6 +257,70 @@ class DetectionProcessor:
             cv2.putText(frame, str(box_id), (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
 
         return frame
+    
+    def draw_transformed_points_with_heatmap(self, original_frame, detected_objects, heatmap):
+        frame = original_frame.copy()
+        
+        for detected_obj in detected_objects:
+            # Center coordinates of the circle
+            x, y = detected_obj.point_2d
+            x, y = int(x), int(y)
+            # Circle color in BGR format
+            circle_color = self.id_to_color(detected_obj.id)
+            
+            # Draw a circle with a black border
+            border_thickness = 3  # Thickness of the border
+            circle_radius = 10    # Radius of the circle
+            border_color = (0, 0, 0)  # Black color in BGR format
+            
+            id_index = detected_obj.id - 1  # Adjust id to be 0-based index
+        
+            # Create a mask for the circle
+            mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.float32)
+            cv2.circle(mask, (x, y), circle_radius, (1,), thickness=-1)  # Draw circle with value 1 on the mask
+    
+            # Update the specific heatmap channel based on detected_obj.id using the mask
+            heatmap[:, :, id_index] += mask
+            
+            # First, draw the border circle
+            cv2.circle(frame, (x, y), circle_radius + border_thickness, border_color, thickness=-1)
+            # Then, draw the color fill circle
+            cv2.circle(frame, (x, y), circle_radius, circle_color, thickness=-1)
+            
+        return frame, heatmap
+    
+    
+# Drawing and visualization functions -----------------------------------------
+def visualize_separate_heatmaps(heatmap, base=10):
+    num_channels = heatmap.shape[2]
+    heatmaps_colored = []
+    
+    for i in range(num_channels):
+        # Apply logarithmic scaling to each channel
+        heatmap_log = np.log1p(heatmap[:, :, i]) / np.log(base)
+        
+        # Normalize the heatmap for display
+        heatmap_normalized = cv2.normalize(heatmap_log, None, 0, 255, cv2.NORM_MINMAX)
+        heatmap_uint8 = np.uint8(heatmap_normalized)
+        
+        # Apply a colormap for visualization
+        heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+        heatmaps_colored.append(heatmap_colored)
+    
+    return heatmaps_colored
+
+def overlay_heatmap_on_image(image, heatmap_colored, alpha=0.5):
+    # Convert the original image to grayscale
+    grayscale_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Convert the grayscale image back to BGR to match the heatmap's channels
+    grayscale_image_bgr = cv2.cvtColor(grayscale_image, cv2.COLOR_GRAY2BGR)
+    
+    # Overlay the heatmap on the converted image
+    # You might adjust the alpha value here or the weights to prioritize the heatmap visibility
+    overlaid_image = cv2.addWeighted(grayscale_image_bgr, 1 - alpha, heatmap_colored, alpha, 0)
+    
+    return overlaid_image
 
 # General video processing functions ------------------------------------------
 
@@ -247,33 +328,108 @@ class VideoProcessor:
     def __init__(self, config, classes_hsv_ranges):
         self.config = config
         self.detection_processor = DetectionProcessor(config["yolo_model_path"], classes_hsv_ranges)
+        self.state = HomographyState(guess_fx=2000, guess_rot=np.array([[0.25, 0, 0]]), guess_trans=(0, 0, 80))
+        self.template_img = cv2.imread(config['input_layout_image'], cv2.IMREAD_COLOR)
+        self.key_points_layout = np.load(config['input_layout_array'])
+        self.heatmap = np.zeros((self.template_img.shape[0], self.template_img.shape[1], 2), dtype=np.float32)
+        self.heatmap_overlay_1 = np.zeros_like(self.template_img)
+        self.heatmap_overlay_2 = np.zeros_like(self.template_img)
         
     def process_frame(self, frame):
         detections = self.detection_processor.model.track(frame, persist=True, verbose=False, tracker="bytetrack.yaml")
         detected_objects = self.detection_processor.compute_detected_objects(detections, frame)
         frame_with_detections = self.detection_processor.draw_detected_objects(frame, detected_objects)
         
-        return frame_with_detections
+        H, guess_fx, guess_rot, guess_trans = homography_transformation_process(frame, 
+                                                                                self.key_points_layout, 
+                                                                                self.state.guess_fx, 
+                                                                                self.state.guess_rot, 
+                                                                                self.state.guess_trans)
         
+        if H is not None:
+            self.state.update_state(guess_fx, guess_rot, guess_trans)
+            
+            for i, det_obj in enumerate(detected_objects):
+                detected_objects[i].point_2d = apply_homography_to_point(H, det_obj.get_bbox_bottom())
+                
+            template_with_detections, self.heatmap = self.detection_processor.draw_transformed_points_with_heatmap(self.template_img, 
+                                                                                                                   detected_objects, 
+                                                                                                                   self.heatmap)
+        else:
+            template_with_detections = self.template_img
+        
+        
+        # TODO
+        #   - Find a way to implement filtering --> Possibly by measuring the points scattering level
+        #   - Implement player re-identification
+        
+        return frame_with_detections, template_with_detections, self.heatmap
+        
+    # Initial function provided by the user
     def process_video(self):
         cap = cv2.VideoCapture(self.config['input_video_path'])
-        
+    
+        # Check if video opened successfully
+        if not cap.isOpened():
+            print("Error opening video stream or file")
+            return
+    
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        layout_width = self.template_img.shape[1] // 2  # New size calculation
+        layout_height = self.template_img.shape[0] // 2  # New size calculation
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+    
+        # Define the codec and create VideoWriter object
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # or use 'XVID' if 'mp4v' does not work
+        
+        # Adjusted output size for single composite video
+        out_composite = cv2.VideoWriter(self.config['output_composite_video_path'], fourcc, fps, (layout_width * 2, layout_height * 2))
         
         with tqdm(total=total_frames, desc="Processing video frames") as pbar:
             while cap.isOpened():
                 ret, frame = cap.read()
                 if ret:
-                    processed_frame = self.process_frame(frame)
+                    processed_frame, layout_2d, heatmap = self.process_frame(frame)
                     
-                    cv2.imshow("Detections", processed_frame)
+                    # Generate heatmaps overlay for both teams
+                    colored_heatmaps = visualize_separate_heatmaps(heatmap)
+                    
+                    heatmap_overlay_1 = overlay_heatmap_on_image(self.template_img, colored_heatmaps[0], alpha=0.7)
+                    heatmap_overlay_2 = overlay_heatmap_on_image(self.template_img, colored_heatmaps[1], alpha=0.7)
+    
+                    # Resize images
+                    small_frame = cv2.resize(processed_frame, (layout_width, layout_height))
+                    small_layout = cv2.resize(layout_2d, (layout_width, layout_height))
+                    small_heatmap_1 = cv2.resize(heatmap_overlay_1, (layout_width, layout_height))
+                    small_heatmap_2 = cv2.resize(heatmap_overlay_2, (layout_width, layout_height))
+    
+                    # Create a blank canvas
+                    canvas = np.zeros((layout_height * 2, layout_width * 2, 3), dtype=np.uint8)
+    
+                    # Place images on the canvas
+                    canvas[0:layout_height, 0:layout_width] = small_frame
+                    canvas[0:layout_height, layout_width:layout_width*2] = small_layout
+                    canvas[layout_height:layout_height*2, 0:layout_width] = small_heatmap_1
+                    canvas[layout_height:layout_height*2, layout_width:layout_width*2] = small_heatmap_2
+    
+                    # Write the composite frame into the file 'output_composite_video_path'
+                    out_composite.write(canvas)
+    
+                    # Display the single composite window
+                    cv2.imshow("Composite", canvas)
+                    
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
-                    
+    
                     pbar.update(1)
                 else:
                     break
-                    
+    
+        # Release everything if job is finished
+        cap.release()
+        out_composite.release()
         cv2.destroyAllWindows()
         
 # Utility functions -----------------------------------------------------------
@@ -292,8 +448,10 @@ def create_output_dirs(config):
     # Set the path for the output CSV file
     config['output_csv_path'] = os.path.join(output_video_dir, 'video_detections.csv')
     
-    # Set the path for the output video file
-    config['output_video_path'] = os.path.join(output_video_dir, 'processed_grid_video.mp4')
+    config['output_heatmap_1_image_path'] = os.path.join(output_video_dir, 'overlay_heatmap_team_1.png')
+    config['output_heatmap_2_image_path'] = os.path.join(output_video_dir, 'overlay_heatmap_team_2.png')
+    
+    config['output_composite_video_path'] = os.path.join(output_video_dir, 'composite_video.mp4')
     
     # Set the path for the HSV ranges text file
     config['hsv_ranges_path'] = os.path.join(output_video_dir, 'hsv_ranges.txt')
@@ -309,9 +467,8 @@ if __name__ == "__main__":
         'yolo_model_path': '../../../Models/pretrained-yolov8-soccer.pt',
         'output_base_dir': '../outputs'
     }
-    
-    config = create_output_dirs(config)
 
+    config = create_output_dirs(config)
     classes_hsv_ranges = setup_hsv_ranges(config, n_classes=2)
     processor = VideoProcessor(config, classes_hsv_ranges)
     processor.process_video()
