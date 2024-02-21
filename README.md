@@ -32,7 +32,7 @@ To set up and run the Soccer Players Analysis System on your local machine, foll
 First, clone the repository to your local machine using Git. Open a terminal or command prompt and run the following command:
 
 ```bash
-git clone https://github.com/Tony-Luna/soccer-players-analysis.git
+git clone git@github.com:yskaaks/terralink-soccer-analytics.git
 cd soccer-players-analysis
 ```
 Where `soccer-players-analysis` should be the path to the directory where the repository was cloned in your local machine.
