@@ -326,8 +326,8 @@ class DetectionProcessor:
         # Example strategy: cycle through a list of predefined BGR colors
         colors = [
             (0, 255, 0),  # Green
-            (0, 0, 255),  # Red
             (255, 0, 0),  # Blue
+            (0, 0, 255),  # Red
             (0, 255, 255), # Cyan
             (255, 0, 255), # Magenta
             (255, 255, 0)  # Yellow
@@ -362,7 +362,7 @@ class DetectionProcessor:
                 cv2.circle(frame, center, radius, (0, 255, 255), 2)  # Yellow circle with a thickness of 2
             
             # Draw only detections of "player" label
-            elif detected_obj.label == 3:
+            else:
                 box_id = detected_obj.id
                 
                 circle_color = self.id_to_color(box_id)
@@ -475,7 +475,7 @@ class VideoProcessor:
         self.heatmap_overlay_2 = np.zeros_like(self.template_img)
         
     def process_frame(self, frame):
-        detections = self.detection_processor.model.track(frame, persist=True, verbose=False, tracker="bytetrack.yaml")
+        detections = self.detection_processor.model.track(frame, persist=True, verbose=False, tracker="botsort.yaml", conf=0.5, imgsz=640)
         detected_objects = self.detection_processor.compute_detected_objects(detections, frame)
         frame_with_detections = self.detection_processor.draw_detected_objects(frame, detected_objects)
         
@@ -575,10 +575,10 @@ class VideoProcessor:
 # Main function ---------------------------------------------------------------
 if __name__ == "__main__":
     config = {
-        'input_video_path': '../../../Datasets/demo/demo_v1.mp4',
+        'input_video_path': '../../../Datasets/demo/demo_v2_sliced.mp4',
         'input_layout_image': '../../../Datasets/soccer field layout/soccer_field_layout.png',
         'input_layout_array': '../../../Datasets/soccer field layout/soccer_field_layout_points.npy',
-        'yolo_model_path': '../../../Models/pretrained-yolov8-soccer.pt',
+        'yolo_model_path': '../../../Models/demo-video-model/yolov8-demo-model.pt',
         'output_base_dir': '../outputs'
     }
     
