@@ -14,6 +14,7 @@ As an initial PoC, this system establishes a solid groundwork for future enhance
 ## Table of Contents
 - [Installation](#installation)
 - [Usage](#usage)
+- [Demo](#demo)
 - [Notebooks](#notebooks)
 - [Scripts](#scripts)
 - [Future Work](#future-work)
@@ -152,6 +153,46 @@ The final outputs are stored in `soccer-players-analysis/Usage/soccer-analytics/
 
 These outputs provide comprehensive visual analytics of player movements and team dynamics throughout the game.
 
+## Demo
+
+This section introduces the demo scripts developed to showcase the application of the Soccer Players Analysis System on a specific video. This demo provides a practical example of the system’s capabilities in analyzing and visualizing soccer matches.
+
+### `main_v2.py` - 2D Projection and Heatmap Generation
+
+The `main_v2.py` script demonstrates the system’s ability to project players and the ball onto a 2D representation of the soccer field, along with generating heatmaps for player movements. Utilizing the Ultralytics YOLO model for player detection, the script applies homography transformations to accurately map detected objects onto the field. This offers a unique perspective on the game, highlighting player distributions and movement patterns throughout the match.
+
+Key Features:
+- **Player and Ball Detection**: Leverages the YOLO object detection model to identify players and the ball in video frames.
+- **Homography Transformation**: Employs a sophisticated algorithm to transform the detected objects’ positions onto a 2D soccer field layout.
+- **Heatmap Visualization**: Generates heatmaps for both teams, visualizing player activity and movement patterns over time.
+
+Usage:
+To run the script, ensure the project environment is activated and navigate to the source directory. Execute the following command:
+
+```bash
+python main_v2.py
+```
+
+![demo_v2](Resources/demo_v2_visualization.gif)
+
+### `main_v3.py` - Goal Tracking with User-Defined Areas
+
+The `main_v3.py` script is crafted to enhance the Soccer Players Analysis System by introducing the capability to track goals scored by each player. It allows users to define a polygonal goal area within the video frame, and the script monitors these areas to detect and attribute goals during a match.
+
+Key Features:
+- **Goal Detection**: Employs the YOLO object detection model in tandem with Norfair tracking to monitor the defined goal areas for scoring activities.
+- **User-Defined Goal Areas**: Provides flexibility in setting custom polygon areas that represent the goal, accommodating various camera angles and field setups.
+- **Score Attribution**: Accurately keeps track of goals scored by each team, enriching match analysis with crucial scoring events.
+
+Usage:
+To utilize this script, ensure the project environment is active and navigate to the source directory. Execute the script with the following command:
+
+```bash
+python main_v3.py
+```
+
+![demo_v3](Resources/demo_v3_visualization.gif)
+
 ## Notebooks
 The Jupyter notebooks within the `Notebooks` directory guide users through leveraging the system's functionalities for a comprehensive analysis of soccer players:
 
@@ -166,8 +207,6 @@ The Jupyter notebooks within the `Notebooks` directory guide users through lever
 
 ### Model Training
 - **`training-yolov8-player-detection.ipynb`**: Provided for reference, this notebook offers a comprehensive walkthrough for training the YOLOv8 model with custom datasets, aiding users in enhancing model performance with their data.
-
-
 
 ## Scripts
 
