@@ -37,8 +37,8 @@ class DetectionProcessor:
         
         # Tracker variables
         self.distance_function = "euclidean"
-        self.distance_threshold = int(config["distance_threshold_centroid"])
-        self.max_distance = int(config["max_distance"])
+        self.distance_threshold = 30
+        self.max_distance = 10000
         
         self.tracker = Tracker(distance_function=self.distance_function, 
                                distance_threshold=self.distance_threshold)
@@ -396,10 +396,9 @@ class VideoProcessor:
 if __name__ == "__main__":
     config = {
         'input_video_path': '../../../Datasets/demo/demo_v2_sliced.mp4',
+        'input_layout_image': '../../../Datasets/soccer field layout/soccer_field_layout.png',
         'yolo_model_path': '../../../Models/yolov8-demo-model/train/weights/best.pt',
-        'output_base_dir': '../outputs_v2',
-        'distance_threshold_centroid': 30, 
-        'max_distance': 10000
+        'output_base_dir': '../outputs_v2'
     }
     
     config = create_output_dirs(config)
