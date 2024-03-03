@@ -29,13 +29,14 @@ def create_output_dirs(config):
     
     # Define paths for output data
     config['output_video_path'] = os.path.join(output_video_dir, 'scores_video.mp4')
+    config['layout_video_path'] = os.path.join(output_video_dir, 'layout_video.mp4')
     config['output_csv'] = os.path.join(output_video_dir, 'soccer_analytics.csv')
     
     return config
 
 def create_heatmaps_dirs(config, teams_dict):
-    heatmap_video_path_list = []
-    heatmap_image_path_list = []
+    heatmap_video_path_dict = {}
+    heatmap_image_path_dict = {}
     
     for key in teams_dict.keys():
         team_letter = teams_dict[key]['team_letter']
@@ -43,11 +44,11 @@ def create_heatmaps_dirs(config, teams_dict):
         heatmap_video_path = os.path.join(config['output_video_dir'], f'heatmap_video_{team_letter}.mp4')
         heatmap_image_path = os.path.join(config['output_video_dir'], f'heatmap_image_{team_letter}.png')
         
-        heatmap_video_path_list.append(heatmap_video_path)
-        heatmap_image_path_list.append(heatmap_image_path)
+        heatmap_video_path_dict[team_letter] = heatmap_video_path
+        heatmap_image_path_dict[team_letter] = heatmap_image_path
         
-    config['output_video_heatmaps'] = heatmap_video_path_list
-    config['output_image_heatmaps'] = heatmap_image_path_list
+    config['output_video_heatmaps'] = heatmap_video_path_dict
+    config['output_image_heatmaps'] = heatmap_image_path_dict
         
     return config
 
@@ -345,7 +346,7 @@ class ObjectDetector:
     def __init__(self, config):
         self.model = YOLO(config["yolo_model_path"])
         
-    def detect(self, frame, verbose=False, conf=0.5, imgsz=640):
+    def detect(self, frame, verbose=False, conf=0.7, imgsz=640):
         yolo_detections = self.model.predict(frame, verbose=verbose, conf=conf, imgsz=imgsz)
         detected_objects = self.compute_detected_objects(yolo_detections)
         
@@ -477,31 +478,47 @@ class GoalPolygon:
                 self.ball_in = False
             
         self.draw_score_box(frame)
-        
-    def draw_score_box(self, frame):
-        # Calculate the number of teams to determine the spacing of score boxes
-        num_teams = len(self.teams_dict)
-        
-        # Frame dimensions
-        height, width = frame.shape[:2]
     
-        # Score box dimensions and initial position
-        box_width = 100  # Adjusted for individual team boxes
+    def draw_score_box(self, frame):
+        # Starting position for the score boxes
+        offset_x = 10  # Offset from the left edge
+        offset_y = 10  # Offset from the top edge
+    
+        # "SCORE" label dimensions
+        score_label_height = 20  # Reduced height to make it thinner
+    
+        # Score box dimensions
+        box_width = 100
         box_height = 50
-        initial_top_left_x = (width // 2) - (num_teams * box_width // 2)
-        top_left_y = 20
-        
-        # Label box dimensions (directly above the score box)
         label_box_height = 20
-        
+    
+        # Calculate the total width of all score boxes
+        num_teams = len(self.teams_dict)
+        total_score_width = num_teams * box_width
+    
+        # Draw the black rectangle for "SCORE" label across all score boxes
+        cv2.rectangle(frame, (offset_x, offset_y), (offset_x + total_score_width, offset_y + score_label_height), (0, 0, 0), -1)
+    
+        # Add "SCORE" text on the rectangle, centered
+        score_label_text = "SCORE"
+        score_label_font_scale = 0.5
+        score_label_font_thickness = 2
+        score_label_text_size = cv2.getTextSize(score_label_text, cv2.FONT_HERSHEY_SIMPLEX, score_label_font_scale, score_label_font_thickness)[0]
+        score_label_text_x = offset_x + (total_score_width - score_label_text_size[0]) // 2
+        score_label_text_y = offset_y + score_label_height - (score_label_height - score_label_text_size[1]) // 2
+        cv2.putText(frame, score_label_text, (score_label_text_x, score_label_text_y), cv2.FONT_HERSHEY_SIMPLEX, score_label_font_scale, (255, 255, 255), score_label_font_thickness)
+    
+        # Adjust initial top left y position for the team score boxes to be directly below the "SCORE" label
+        initial_top_left_y = offset_y + score_label_height  # No additional space needed
+    
         for index, (team_id, team_info) in enumerate(self.teams_dict.items()):
             # Calculate positions for each team's score box
-            top_left_x = initial_top_left_x + (box_width * index)
+            top_left_x = offset_x + (box_width * index)
+            top_left_y = initial_top_left_y
             bottom_right_x = top_left_x + box_width
-            label_top_left_y = top_left_y - label_box_height
-            label_bottom_right_y = top_left_y
+            label_top_left_y = top_left_y
+            label_bottom_right_y = top_left_y + label_box_height
     
-            # Team-specific settings
             team_letter = team_info['team_letter']
             bgr_color = team_info['bgr_color']
             score = team_info['score']
@@ -510,28 +527,24 @@ class GoalPolygon:
             cv2.rectangle(frame, (top_left_x, label_top_left_y), (bottom_right_x, label_bottom_right_y), bgr_color, -1)
     
             # Draw the white score box
-            cv2.rectangle(frame, (top_left_x, top_left_y), (bottom_right_x, top_left_y + box_height), (255, 255, 255), -1)
+            cv2.rectangle(frame, (top_left_x, label_bottom_right_y), (bottom_right_x, label_bottom_right_y + box_height), (255, 255, 255), -1)
     
-            # Prepare and draw the team letter in the label box
+            # Team letter in the label box, centered
             label_text = f"({team_letter.upper()})"
             label_font_scale = 0.5
-            label_font_thickness = 1
-            label_text_color = (255, 255, 255)  # White text
-            label_text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, label_font_thickness)[0]
+            label_text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, 1)[0]
             label_text_x = top_left_x + (box_width - label_text_size[0]) // 2
-            label_text_y = label_top_left_y + (label_box_height + label_text_size[1]) // 2
-            cv2.putText(frame, label_text, (label_text_x, label_text_y), cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, label_text_color, label_font_thickness)
+            label_text_y = label_top_left_y + (label_box_height + label_text_size[1]) // 2 - 5  # Adjust vertical position
+            cv2.putText(frame, label_text, (label_text_x, label_text_y), cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, (255, 255, 255), 2)
     
-            # Prepare and draw the score text in the score box
+            # Score text in the score box, centered
             score_text = f"{score}"
             score_font_scale = 1
-            score_font_thickness = 2
-            score_text_color = (0, 0, 0)  # Black text
-            score_text_size = cv2.getTextSize(score_text, cv2.FONT_HERSHEY_SIMPLEX, score_font_scale, score_font_thickness)[0]
+            score_text_size = cv2.getTextSize(score_text, cv2.FONT_HERSHEY_SIMPLEX, score_font_scale, 2)[0]
             score_text_x = top_left_x + (box_width - score_text_size[0]) // 2
-            score_text_y = top_left_y + (box_height + score_text_size[1]) // 2
-            cv2.putText(frame, score_text, (score_text_x, score_text_y), cv2.FONT_HERSHEY_SIMPLEX, score_font_scale, score_text_color, score_font_thickness)
-
+            score_text_y = label_bottom_right_y + (box_height + score_text_size[1]) // 2 - 5  # Adjust vertical position
+            cv2.putText(frame, score_text, (score_text_x, score_text_y), cv2.FONT_HERSHEY_SIMPLEX, score_font_scale, (0, 0, 0), 2)
+    
 # Team Player class -----------------------------------------------------------
 class TeamPlayer:
     def __init__(self, config, team_id, team_dict):
@@ -541,6 +554,7 @@ class TeamPlayer:
         self.team_letter = team_dict[self.team_id]['team_letter']
         self.color = team_dict[self.team_id]['bgr_color']
         self.max_bbox = None
+        self.center_point = None
         self.labels_of_interest = config['player_labels']
         
     def extract_hsv_classes_ranges(self, team_ranges):
@@ -600,12 +614,14 @@ class TeamPlayer:
                 
                 index_max_area = np.argmax(bbox_areas)
                 self.max_bbox = filtered_bbox[index_max_area]
-                
+                self.center_point = (int((self.max_bbox[0] + self.max_bbox[2]) / 2), int(self.max_bbox[3]))
                 self.draw_object(self.max_bbox, frame)
             else:
                 self.max_bbox = None
+                self.center_point = None
         else:
             self.max_bbox = None
+            self.center_point = None
 
     def draw_object(self, bbox, frame):
         color = self.color
@@ -619,6 +635,9 @@ class TeamPlayer:
 
         # Draw the bounding box
         frame = cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
+        
+        # Draw bottom center point
+        frame = cv2.circle(frame, self.center_point, radius=5, color=color, thickness=-1)
 
         # Calculate text size for background
         (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, font_thickness)
@@ -634,6 +653,7 @@ class Ball:
     def __init__(self, config):
         self.color = (255, 255, 255)
         self.last_team_id = None
+        self.last_team_letter = None
         self.center_point = None
         
         self.labels_of_interest = config['ball_labels']
@@ -659,6 +679,7 @@ class Ball:
                         if (center_y > py1 + 2*py2/3) and (center_y < py2):
                             self.color = player.color
                             self.last_team_id = player.team_id
+                            self.last_team_letter = player.team_letter
                     
             self.draw_object(max_bbox, frame)
         else:
@@ -679,28 +700,218 @@ class Ball:
         # Draw the circle
         cv2.circle(frame, (center_x, center_y), radius, color, -1)
         
-# Video processor class -------------------------------------------------------
+# Layout projector object ------------------------------------------------------
+class LayoutProjector:
+    def __init__(self, config, H, teams_dict):
+        self.layout_image, self.layout_img_gray = self.load_layout(config['input_layout_image'])
+        self.heatmaps_dict, self.overlay_heatmaps_dict = self.initialize_heatmaps_dict(teams_dict)
+        
+        self.H = H
+        self.layout_dict, self.ball_poss_dict = self.initialize_layout_dict(teams_dict)
+        
+    def initialize_heatmaps_dict(self, teams_dict):
+        heatmap_zeros = np.zeros((self.layout_image.shape[0], self.layout_image.shape[1]), dtype=np.float32)
+        heatmaps_dict = {teams_dict[key]['team_letter']: heatmap_zeros.copy() for key in teams_dict.keys()}
+        
+        heatmap_zeros_3c = np.zeros((self.layout_image.shape[0], self.layout_image.shape[1], 3), dtype=np.float32)
+        overlay_heatmaps_dict = {teams_dict[key]['team_letter']: heatmap_zeros_3c.copy() for key in teams_dict.keys()}
+        
+        return heatmaps_dict, overlay_heatmaps_dict
+        
+    def load_layout(self, img_path):
+        layout_img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        
+        layout_img_gray = cv2.cvtColor(layout_img, cv2.COLOR_BGR2GRAY)
+        layout_img_gray = cv2.cvtColor(layout_img_gray, cv2.COLOR_GRAY2BGR)
+        
+        return layout_img, layout_img_gray    
+    
+    def initialize_layout_dict(self, teams_dict):
+        ball_poss_dict = {teams_dict[key]['team_letter']: {'color': teams_dict[key]['bgr_color'], 'frames_count': 0} for key in teams_dict.keys()}
+        
+        layout_dict = {teams_dict[key]['team_letter']: [] for key in teams_dict.keys()}
+        layout_dict['ball'] = []
+        layout_dict['ball_possession'] = []
+        
+        return layout_dict, ball_poss_dict
+    
+    def update_draw_layout_dict(self, team_players_list, ball_object):
+        temp_layout_dict = {}
+        
+        for player in team_players_list:
+            temp_layout_dict[player.team_letter] = {'point': self.apply_homography_to_point(player.center_point),
+                                                    'color': player.color}
+            
+        temp_layout_dict['ball'] = {'point':self.apply_homography_to_point(ball_object.center_point),
+                                    'color': ball_object.color}
+        
+        for key in temp_layout_dict.keys():
+            self.layout_dict[key].append(temp_layout_dict[key]['point'])
+        
+        if ball_object.last_team_letter is not None:
+            self.ball_poss_dict[ball_object.last_team_letter]['frames_count'] += 1
+            
+        self.layout_dict['ball_possession'].append(ball_object.last_team_letter)
+        
+        drawn_layout = self.draw_transformed_points_with_heatmap(temp_layout_dict)
+        
+        return drawn_layout, self.overlay_heatmaps_dict
+        
+    def draw_transformed_points_with_heatmap(self, temp_layout_dict):
+        layout_img = self.layout_image.copy()
+        
+        # Draw a circle with a black border
+        border_thickness = 3
+        circle_radius = 10
+        
+        for key in temp_layout_dict.keys():
+            point = temp_layout_dict[key]['point']
+            
+            if point is not None:
+                x, y = int(point[0]), int(point[1])
+                
+                if key == 'ball':
+                    border_color = (255, 255, 255)
+                else:
+                    border_color = (0, 0, 0)
+                    
+                    # Update heatmaps
+                    mask = np.zeros((layout_img.shape[0], layout_img.shape[1]), dtype=np.float32)
+                    cv2.circle(mask, (x, y), circle_radius, (1,), thickness=-1)
+                    
+                    self.heatmaps_dict[key] += mask
+                    self.visualize_heatmaps()
+                
+                # Draw points over layout
+                circle_color = temp_layout_dict[key]['color']
+                
+                cv2.circle(layout_img, (x, y), circle_radius + border_thickness, border_color, thickness=-1)
+                cv2.circle(layout_img, (x, y), circle_radius, circle_color, thickness=-1)
+            
+        return layout_img
+    
+    def visualize_heatmaps(self, base=10, alpha=0.5):
+        for key, heatmap in self.heatmaps_dict.items():
+            heatmap_log = np.log1p(heatmap) / np.log(base)
+            
+            # Normalize the heatmap for display
+            heatmap_normalized = cv2.normalize(heatmap_log, None, 0, 255, cv2.NORM_MINMAX)
+            heatmap_uint8 = np.uint8(heatmap_normalized)
+            
+            # Apply a colormap for visualization
+            heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+            
+            overlayed_image = cv2.addWeighted(self.layout_img_gray, 1 - alpha, heatmap_colored, alpha, 0)
+            
+            self.overlay_heatmaps_dict[key] = overlayed_image
+            
+        
+    def apply_homography_to_point(self, point):
+        if point is not None:
+            point = np.array(point)
+            H = self.H 
+            
+            # Convert point to homogeneous coordinates
+            point_homogeneous = np.append(point, 1)
+            
+            # Apply the homography matrix
+            point_transformed_homogeneous = np.dot(H, point_homogeneous)
+            
+            # Convert back to Cartesian coordinates
+            point_transformed = point_transformed_homogeneous[:2] / point_transformed_homogeneous[2]
+               
+            return point_transformed
+        else:
+            return point
+        
+    def update_draw_possession_time(self, frame, fps):
+        # Calculate the dimensions of the frame and the text boxes
+        frame_height, frame_width = frame.shape[:2]
+        offset_x = 10  # Offset from the right edge
+        offset_y = 10  # Offset from the top edge
+    
+        # "POSSESSION" label dimensions to match "SCORE" label
+        label_height = 20
+        box_width = 100
+        box_height = 50
+        label_box_height = 20
+        font_scale = 0.5
+        font_thickness = 2
+    
+        # Calculate the total width of the possession boxes
+        num_teams = len(self.ball_poss_dict)
+        total_possession_width = num_teams * box_width
+    
+        # Draw the "POSSESSION" label on the top right
+        possession_label_top_right_x = frame_width - offset_x - total_possession_width
+        cv2.rectangle(frame, (possession_label_top_right_x, offset_y), (frame_width - offset_x, offset_y + label_height), (0, 0, 0), -1)
+        label_text = "POSSESSION"
+        label_text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0]
+        label_text_x = possession_label_top_right_x + (total_possession_width - label_text_size[0]) // 2
+        label_text_y = offset_y + label_height - (label_height - label_text_size[1]) // 2
+        cv2.putText(frame, label_text, (label_text_x, label_text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness)
+    
+        # Initialize the y-coordinate for the team boxes to be below the "POSSESSION" label
+        initial_top_left_y = offset_y + label_height
+    
+        for index, (team_letter, values) in enumerate(sorted(self.ball_poss_dict.items(), key=lambda x: x[0])):
+            color = values['color']
+            frame_count = values['frames_count']
+            current_time = frame_count / fps  # Time in seconds
+            minutes = int(current_time // 60)
+            seconds = int(current_time % 60)
+            time_str = f"{minutes:02d}:{seconds:02d}"  # Format time as mm:ss
+    
+            # Draw the team-specific possession time boxes
+            top_right_x = frame_width - offset_x - (box_width * (index + 1))
+            cv2.rectangle(frame, (top_right_x, initial_top_left_y), (top_right_x + box_width, initial_top_left_y + label_box_height), color, -1)
+    
+            # Team letter in the label box, centered
+            team_label = f"({team_letter.upper()})"
+            team_label_size = cv2.getTextSize(team_label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0]
+            team_label_x = top_right_x + (box_width - team_label_size[0]) // 2
+            team_label_y = initial_top_left_y + (label_box_height + team_label_size[1]) // 2 - 5
+            cv2.putText(frame, team_label, (team_label_x, team_label_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness)
+    
+            # Draw the white box for the possession time, below the team letter box
+            cv2.rectangle(frame, (top_right_x, initial_top_left_y + label_box_height), (top_right_x + box_width, initial_top_left_y + label_box_height + box_height), (255, 255, 255), -1)
+    
+            # Possession time in the white box, centered
+            time_text_size = cv2.getTextSize(time_str, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
+            time_text_x = top_right_x + (box_width - time_text_size[0]) // 2
+            time_text_y = initial_top_left_y + label_box_height + (box_height + time_text_size[1]) // 2 - 5
+            cv2.putText(frame, time_str, (time_text_x, time_text_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    
+        return frame
+
+# Video processor class =======================================================
 class VideoProcessor:
-    def __init__(self, config, object_detector, goal_polygon, team_players_list, ball_object):
+    def __init__(self, config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector):
         self.config = config
         self.object_detector = object_detector
         
         self.goal_polygon = goal_polygon
         self.team_players_list = team_players_list
         self.ball_object = ball_object
+        self.layout_projector = layout_projector
+        
+        self.fps = 0
         
     def process_frame(self, frame):
-        self.goal_polygon.draw_polygon_on_frame(frame)
         detected_objects = self.object_detector.detect(frame)
         
-        for player in team_players_list:
+        self.goal_polygon.draw_polygon_on_frame(frame)
+        
+        for player in self.team_players_list:
             player.update_draw_location(detected_objects, frame)
         
-        self.ball_object.update_draw_location(team_players_list, detected_objects, frame)
-        
+        self.ball_object.update_draw_location(self.team_players_list, detected_objects, frame)
         self.goal_polygon.update_draw_score(self.ball_object, frame)
-
-        return frame
+        
+        drawn_layout, overlay_heatmaps_dict = self.layout_projector.update_draw_layout_dict(self.team_players_list, self.ball_object)
+        frame = self.layout_projector.update_draw_possession_time(frame, self.fps)
+        
+        return frame, drawn_layout, overlay_heatmaps_dict
         
     def process_video(self):
         cap = cv2.VideoCapture(self.config['input_video_path'])
@@ -713,23 +924,31 @@ class VideoProcessor:
         # Get video frame width, height, and FPS for the output video
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        self.fps = cap.get(cv2.CAP_PROP_FPS)
         
         # Define the codec and create VideoWriter object
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
-        out = cv2.VideoWriter(self.config['output_video_path'], fourcc, fps, (frame_width, frame_height))
-    
+        self.fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
+        out = cv2.VideoWriter(self.config['output_video_path'], self.fourcc, self.fps, (frame_width, frame_height))
+        heatmap_outs_dict, layout_out_writer = self.initialize_heatmap_layout_output_writers()
+        
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
         with tqdm(total=total_frames, desc="Processing video frames") as pbar:
             while cap.isOpened():
                 ret, frame = cap.read()
                 if ret:
-                    processed_frame = self.process_frame(frame)
+                    processed_frame, drawn_layout, overlay_heatmaps_dict = self.process_frame(frame)
+                    
                     out.write(processed_frame)
+                    layout_out_writer.write(drawn_layout)
     
                     # Display the single composite window
                     cv2.imshow("Detections", processed_frame)
+                    cv2.imshow("Layout", drawn_layout)
+                    
+                    for key, heatmap in overlay_heatmaps_dict.items():
+                        heatmap_outs_dict[key].write(heatmap)
+                        cv2.imshow(key, heatmap)
                     
                     # Check if 'ESC' key was pressed
                     if cv2.waitKey(1) & 0xFF == 27:  # 27 is the ASCII value for 'ESC'
@@ -742,7 +961,25 @@ class VideoProcessor:
     	# Release everything if job is finished
         cap.release()
         out.release()
+        layout_out_writer.release()
+        
+        for out_wirter in heatmap_outs_dict.values():
+            out_wirter.release()
+        
         cv2.destroyAllWindows()
+        
+    def initialize_heatmap_layout_output_writers(self):
+        heatmap_outs_dict = {}
+        
+        heatmap_video_paths = self.config['output_video_heatmaps']
+        layout_height, layout_width = self.layout_projector.layout_image.shape[0:2]
+        
+        for key, video_path in heatmap_video_paths.items():
+            heatmap_outs_dict[key] = cv2.VideoWriter(video_path, self.fourcc, self.fps, (layout_width, layout_height))
+            
+        layout_out_writer = cv2.VideoWriter(self.config['layout_video_path'], self.fourcc, self.fps, (layout_width, layout_height))
+        
+        return heatmap_outs_dict, layout_out_writer
 
 # Main function ===============================================================
 if __name__ == "__main__":
@@ -756,7 +993,6 @@ if __name__ == "__main__":
         'ball_labels': [1],
         'n_classes': 2
     }
-    
     config = create_output_dirs(config)
     
     object_detector = ObjectDetector(config)
@@ -764,13 +1000,16 @@ if __name__ == "__main__":
     # HSV Ranges setup
     hsv_setup = HSVRangeSetup(config)
     teams_dict = hsv_setup.setup_hsv_ranges(object_detector)
-    
+
     # Include the paths to the heatmap images and videos
     config = create_heatmaps_dirs(config, teams_dict)
 
     # H Matrix setup
     homography_setup = HomographySetup(config)
     H = homography_setup.compute_homography_matrix()
+    
+    # Create layout registration object
+    layout_projector = LayoutProjector(config, H, teams_dict)
     
     #2. Analysis stage --------------------------------------------------------
     # Goal polygon setup
@@ -783,18 +1022,5 @@ if __name__ == "__main__":
     ball_object = Ball(config)
     
     # Create video processing object and process video
-    processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object)
+    processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector)
     processor.process_video()
-    
-    
-
-
-
-
-
-
-
-
-
-
-
