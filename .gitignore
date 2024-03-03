@@ -62,3 +62,7 @@ maildir
 outputs/
 outputs_v2/
 output/
+
+venv/
+
+demo/
