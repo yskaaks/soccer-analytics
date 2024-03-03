@@ -7,6 +7,7 @@ import random
 import math
 import sys
 from tqdm import tqdm
+import string
 
 # Utility functions ===========================================================
 def create_output_dirs(config):
@@ -22,44 +23,41 @@ def create_output_dirs(config):
         os.makedirs(output_video_dir)
     
     # Define paths for input data
-    config['hsv_ranges_path'] = os.path.join(output_video_dir, 'hsv_ranges.txt')
+    config['hsv_ranges_path'] = os.path.join(output_video_dir, 'hsv_ranges.json')
     config['h_matrix_path'] = os.path.join(output_video_dir, 'h_matrix.npy')
     config['goal_polygon_path'] = os.path.join(output_video_dir, 'goal_polygon.npy')
     
     # Define paths for output data
     config['output_video_path'] = os.path.join(output_video_dir, 'scores_video.mp4')
-    config['output_video_heatmap_a'] = os.path.join(output_video_dir, 'heatmap_a_video.mp4')
-    config['output_video_heatmap_b'] = os.path.join(output_video_dir, 'heatmap_b_video.mp4')
-    config['output_heatmap_a'] = os.path.join(output_video_dir, 'heatmap_a.png')
-    config['output_heatmap_b'] = os.path.join(output_video_dir, 'heatmap_b.png')
     config['output_csv'] = os.path.join(output_video_dir, 'soccer_analytics.csv')
     
+    return config
+
+def create_heatmaps_dirs(config, teams_dict):
+    heatmap_video_path_list = []
+    heatmap_image_path_list = []
+    
+    for key in teams_dict.keys():
+        team_letter = teams_dict[key]['team_letter']
+        
+        heatmap_video_path = os.path.join(config['output_video_dir'], f'heatmap_video_{team_letter}.mp4')
+        heatmap_image_path = os.path.join(config['output_video_dir'], f'heatmap_image_{team_letter}.png')
+        
+        heatmap_video_path_list.append(heatmap_video_path)
+        heatmap_image_path_list.append(heatmap_image_path)
+        
+    config['output_video_heatmaps'] = heatmap_video_path_list
+    config['output_image_heatmaps'] = heatmap_image_path_list
+        
     return config
 
 # Setup stage =================================================================
 # HSV ranges per class --------------------------------------------------------
 class HSVRangeSetup:
-    def __init__(self, config, n_classes=2, labels_of_interest=[2, 3]):
+    def __init__(self, config):
         self.config = config
-        self.n_classes = n_classes
-        self.labels_of_interest = labels_of_interest
-        
-    def load_hsv_ranges(self, file_path):
-        try:
-            with open(file_path, 'r') as file:
-                hsv_ranges_list = json.load(file)
-            hsv_ranges = [(np.array(lower), np.array(upper)) for lower, upper in hsv_ranges_list]
-            return hsv_ranges
-        except Exception as e:
-            raise ValueError(f"Error loading HSV ranges: {e}")
-
-    def save_hsv_ranges(self, hsv_ranges, file_path):
-        try:
-            hsv_ranges_list = [(lower.tolist(), upper.tolist()) for lower, upper in hsv_ranges]
-            with open(file_path, 'w') as file:
-                json.dump(hsv_ranges_list, file)
-        except Exception as e:
-            raise ValueError(f"Error saving HSV ranges: {e}")
+        self.n_classes = config['n_classes']
+        self.labels_of_interest = config['player_labels']
 
     def extract_and_detect_frames(self, video_path, object_detector, labels_of_interest):
         """
@@ -132,12 +130,27 @@ class HSVRangeSetup:
                 break
     
         return grid_image
-
+    
+    def generate_unique_id(self, lower_bound, upper_bound):
+        """Generates a unique ID from HSV lower and upper bounds."""
+        return '_'.join(map(str, np.concatenate((lower_bound, upper_bound))))
+    
+    def save_hsv_ranges(self, hsv_ranges_dict, file_path):
+        """Saves the HSV ranges dictionary to a file in JSON format."""
+        with open(file_path, 'w') as file:
+            json.dump(hsv_ranges_dict, file, indent=4)
+    
+    def load_hsv_ranges(self, file_path):
+        """Loads the HSV ranges from a file, converts them back to numpy arrays."""
+        with open(file_path, 'r') as file:
+            hsv_ranges_dict = json.load(file)
+        for unique_id in hsv_ranges_dict:
+            hsv_ranges_dict[unique_id]['lower_bound'] = np.array(hsv_ranges_dict[unique_id]['lower_bound'])
+            hsv_ranges_dict[unique_id]['upper_bound'] = np.array(hsv_ranges_dict[unique_id]['upper_bound'])
+            hsv_ranges_dict[unique_id]['bgr_color'] = tuple(map(int, hsv_ranges_dict[unique_id]['bgr_color']))
+        return hsv_ranges_dict
+    
     def setup_hsv_ranges(self, object_detector):
-        """
-        Sets up HSV ranges using detected objects from an object detector model.
-        Prints instructions in the console and only allows 'y' to advance or 'esc' to quit.
-        """
         if os.path.exists(self.config.get('hsv_ranges_path', '')):
             return self.load_hsv_ranges(self.config['hsv_ranges_path'])
     
@@ -147,8 +160,9 @@ class HSVRangeSetup:
     
         concatenated_crops = self.scale_and_concat_crops(detected_crops)
         segmentation = VideoSegmentation('Segmentation')
-        hsv_ranges = []
-        
+        hsv_ranges_dict = {}
+        alphabet = iter(string.ascii_lowercase)  # Create an iterator over the alphabet
+    
         print("Instructions:")
         print("- Press 'y' if you are satisfied with the HSV range and want to move to the next class.")
         print("- Press 'Esc' to exit the program.")
@@ -159,7 +173,23 @@ class HSVRangeSetup:
                 key = cv2.waitKey(1) & 0xFF
     
                 if key == ord('y'):
-                    hsv_ranges.append((lower_bound, upper_bound))
+                    unique_id = self.generate_unique_id(lower_bound, upper_bound)
+                    # Calculate the midpoint of the hue range for RGB color
+                    mid_hue = (lower_bound[0] + upper_bound[0]) / 2
+                    mid_hsv_color = np.array([[[int(mid_hue), 255, 255]]], dtype=np.uint8)
+                    mid_rgb_color = cv2.cvtColor(mid_hsv_color, cv2.COLOR_HSV2BGR)[0][0].tolist()
+                    
+                    # Assign a letter from the alphabet to this unique_id
+                    team_letter = next(alphabet, None)
+                    if team_letter is None:
+                        raise ValueError("Exceeded alphabet limit for unique team letters.")
+                    
+                    hsv_ranges_dict[unique_id] = {
+                        'lower_bound': lower_bound.tolist(),
+                        'upper_bound': upper_bound.tolist(),
+                        'bgr_color': mid_rgb_color,
+                        'team_letter': team_letter
+                    }
                     break
                 elif key == 27:  # Escape key
                     cv2.destroyAllWindows()
@@ -168,8 +198,8 @@ class HSVRangeSetup:
             segmentation.reset_trackbars()
     
         cv2.destroyAllWindows()
-        self.save_hsv_ranges(hsv_ranges, self.config['hsv_ranges_path'])
-        return hsv_ranges
+        self.save_hsv_ranges(hsv_ranges_dict, self.config['hsv_ranges_path'])
+        return self.load_hsv_ranges(self.config['hsv_ranges_path'])
 
 class VideoSegmentation:
     def __init__(self, window_name):
@@ -302,17 +332,57 @@ class HomographySetup:
         concatenated_img = np.concatenate((padded_layout_img, padded_first_frame), axis=1)
         return padded_layout_img, padded_first_frame, concatenated_img
     
+# Object detection functions ==================================================
+class DetectedObject:
+    def __init__(self, bbox, lbl):
+        self.bbox = [int(j) for j in bbox]
+        self.label = lbl
+    def get_bbox_bottom(self):
+        xmin, ymin, xmax, ymax = self.bbox
+        return np.array([int((xmin + xmax) / 2), int(ymax)])
+        
+class ObjectDetector:
+    def __init__(self, config):
+        self.model = YOLO(config["yolo_model_path"])
+        
+    def detect(self, frame, verbose=False, conf=0.5, imgsz=640):
+        yolo_detections = self.model.predict(frame, verbose=verbose, conf=conf, imgsz=imgsz)
+        detected_objects = self.compute_detected_objects(yolo_detections)
+        
+        return detected_objects
+
+    def compute_detected_objects(self, yolo_detections):
+        detected_objects = []
+        detections_as_xyxy = yolo_detections[0].boxes.xyxy
+        labels = yolo_detections[0].boxes.cls
+
+        for lbl, det_xyxy in zip(labels, detections_as_xyxy):
+            det_xyxy = det_xyxy.cpu().numpy()
+            lbl = int(lbl.cpu().numpy())
+
+            x1, y1, x2, y2 = det_xyxy
+            det_object = DetectedObject(det_xyxy, lbl)
+            detected_objects.append(det_object)
+        
+        return detected_objects
+    
+# Classes os elements of interest =============================================
 # Manual goal polygon ---------------------------------------------------------
 class GoalPolygon:
-    def __init__(self, config):
+    def __init__(self, config, teams_dict):
         self.config = config
         self.first_frame = self.load_first_frame()
         self.polygon = []
         self.load_and_draw_polygon()
         self.ball_in = False
-        self.teams_scores = [0, 0]
-        self.team_label_idx = {2: 0,
-                               3: 1}
+        
+        self.teams_dict = self.initialize_teams_scores(teams_dict)
+        
+    def initialize_teams_scores(self, teams_dict):
+        for key in teams_dict.keys():
+            teams_dict[key]['score'] = 0
+            
+        return teams_dict
         
     def load_polygon_if_exists(self):
         polygon_path = self.config['goal_polygon_path']
@@ -399,106 +469,292 @@ class GoalPolygon:
             if not self.ball_in and result == 1:
                 self.ball_in = True
                 
-                team_label = ball_object.last_team_label
+                team_id = ball_object.last_team_id
                 
-                if team_label is not None:
-                    team_idx = self.team_label_idx[team_label]
-                    self.teams_scores[team_idx] += 1
+                if team_id in self.teams_dict:
+                    self.teams_dict[team_id]['score'] += 1
             if self.ball_in and result == -1:
                 self.ball_in = False
             
         self.draw_score_box(frame)
-            
+        
     def draw_score_box(self, frame):
-        scores = self.teams_scores
+        # Calculate the number of teams to determine the spacing of score boxes
+        num_teams = len(self.teams_dict)
         
         # Frame dimensions
         height, width = frame.shape[:2]
     
-        # Score box dimensions and position
-        box_width = 200
+        # Score box dimensions and initial position
+        box_width = 100  # Adjusted for individual team boxes
         box_height = 50
-        top_left_x = width // 2 - box_width // 2
+        initial_top_left_x = (width // 2) - (num_teams * box_width // 2)
         top_left_y = 20
-        bottom_right_x = top_left_x + box_width
-        bottom_right_y = top_left_y + box_height
-    
-        # Label box dimensions and position (directly above the score box)
+        
+        # Label box dimensions (directly above the score box)
         label_box_height = 20
-        label_top_left_y = top_left_y - label_box_height
-        label_bottom_right_y = top_left_y
-    
-        # Draw the label box
-        cv2.rectangle(frame, (top_left_x, label_top_left_y), (bottom_right_x, label_bottom_right_y), (0, 0, 0), -1)
-    
-        # Draw the white score box
-        cv2.rectangle(frame, (top_left_x, top_left_y), (bottom_right_x, bottom_right_y), (255, 255, 255), -1)
-    
-        # Prepare and draw the "Points" label in the label box
-        label_text = "(A) - Points - (B)"
-        label_font_scale = 0.5
-        label_font_thickness = 1
-        label_text_color = (255, 255, 255)  # White text
-        label_text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, label_font_thickness)[0]
-        label_text_x = top_left_x + (box_width - label_text_size[0]) // 2
-        label_text_y = label_top_left_y + (label_box_height + label_text_size[1]) // 2
-        cv2.putText(frame, label_text, (label_text_x, label_text_y), cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, label_text_color, label_font_thickness)
-    
-        # Prepare and draw the score text in the score box
-        score_text = f"{scores[0]} - {scores[1]}"
-        score_font_scale = 1
-        score_font_thickness = 2
-        score_text_color = (0, 0, 0)  # Black text
-        score_text_size = cv2.getTextSize(score_text, cv2.FONT_HERSHEY_SIMPLEX, score_font_scale, score_font_thickness)[0]
-        score_text_x = top_left_x + (box_width - score_text_size[0]) // 2
-        score_text_y = top_left_y + (box_height + score_text_size[1]) // 2
-        cv2.putText(frame, score_text, (score_text_x, score_text_y), cv2.FONT_HERSHEY_SIMPLEX, score_font_scale, score_text_color, score_font_thickness)
-    
-
-
-# Object detection functions ==================================================
-class DetectedObject:
-    def __init__(self, bbox, lbl):
-        self.bbox = [int(j) for j in bbox]
-        self.label = lbl
-    def get_bbox_bottom(self):
-        xmin, ymin, xmax, ymax = self.bbox
-        return np.array([int((xmin + xmax) / 2), int(ymax)])
         
-class ObjectDetector:
+        for index, (team_id, team_info) in enumerate(self.teams_dict.items()):
+            # Calculate positions for each team's score box
+            top_left_x = initial_top_left_x + (box_width * index)
+            bottom_right_x = top_left_x + box_width
+            label_top_left_y = top_left_y - label_box_height
+            label_bottom_right_y = top_left_y
+    
+            # Team-specific settings
+            team_letter = team_info['team_letter']
+            bgr_color = team_info['bgr_color']
+            score = team_info['score']
+    
+            # Draw the label box with team-specific BGR color
+            cv2.rectangle(frame, (top_left_x, label_top_left_y), (bottom_right_x, label_bottom_right_y), bgr_color, -1)
+    
+            # Draw the white score box
+            cv2.rectangle(frame, (top_left_x, top_left_y), (bottom_right_x, top_left_y + box_height), (255, 255, 255), -1)
+    
+            # Prepare and draw the team letter in the label box
+            label_text = f"({team_letter.upper()})"
+            label_font_scale = 0.5
+            label_font_thickness = 1
+            label_text_color = (255, 255, 255)  # White text
+            label_text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, label_font_thickness)[0]
+            label_text_x = top_left_x + (box_width - label_text_size[0]) // 2
+            label_text_y = label_top_left_y + (label_box_height + label_text_size[1]) // 2
+            cv2.putText(frame, label_text, (label_text_x, label_text_y), cv2.FONT_HERSHEY_SIMPLEX, label_font_scale, label_text_color, label_font_thickness)
+    
+            # Prepare and draw the score text in the score box
+            score_text = f"{score}"
+            score_font_scale = 1
+            score_font_thickness = 2
+            score_text_color = (0, 0, 0)  # Black text
+            score_text_size = cv2.getTextSize(score_text, cv2.FONT_HERSHEY_SIMPLEX, score_font_scale, score_font_thickness)[0]
+            score_text_x = top_left_x + (box_width - score_text_size[0]) // 2
+            score_text_y = top_left_y + (box_height + score_text_size[1]) // 2
+            cv2.putText(frame, score_text, (score_text_x, score_text_y), cv2.FONT_HERSHEY_SIMPLEX, score_font_scale, score_text_color, score_font_thickness)
+
+# Team Player class -----------------------------------------------------------
+class TeamPlayer:
+    def __init__(self, config, team_id, team_dict):
+        self.hsv_classes_ids, self.hsv_classes_ranges = self.extract_hsv_classes_ranges(team_dict)
+        
+        self.team_id = team_id
+        self.team_letter = team_dict[self.team_id]['team_letter']
+        self.color = team_dict[self.team_id]['bgr_color']
+        self.max_bbox = None
+        self.labels_of_interest = config['player_labels']
+        
+    def extract_hsv_classes_ranges(self, team_ranges):
+        keys_to_keep = ['lower_bound', 'upper_bound']
+        
+        hsv_ids_list = []
+        hsv_ranges_list = []
+    
+        for class_id, nested_dict in team_ranges.items():
+            # Directly append the class_id to the ids list
+            hsv_ids_list.append(class_id)
+            
+            # Extract the desired keys if they exist, and append as a pair to the ranges list
+            if all(key in nested_dict for key in keys_to_keep):
+                hsv_ranges_list.append([nested_dict[keys_to_keep[0]], nested_dict[keys_to_keep[1]]])
+        
+        return hsv_ids_list, hsv_ranges_list
+    
+    def classify_by_color(self, frame_crop):
+        hsv_classes_ids, hsv_classes_ranges = self.hsv_classes_ids, self.hsv_classes_ranges
+        
+        frame_crop_hsv = cv2.cvtColor(frame_crop, cv2.COLOR_BGR2HSV)
+        class_scores = np.zeros((len(hsv_classes_ids),), dtype=np.float32)
+
+        for i, hsv_ranges in enumerate(hsv_classes_ranges):
+            lower_bound, upper_bound = hsv_ranges
+            mask = cv2.inRange(frame_crop_hsv, lower_bound, upper_bound)
+
+            class_scores[i] = np.sum(mask)
+
+        return hsv_classes_ids[np.argmax(class_scores)]
+    
+    def filter_detections_by_class(self, detected_bbox, frame):
+        filtered_bbox = []
+        
+        target_id = self.team_id
+        
+        for bbox in detected_bbox:
+            x1, y1, x2, y2 = bbox
+            frame_crop = frame[int(y1):int(y2)+1, int(x1):int(x2)+1, :]
+            pred_id = self.classify_by_color(frame_crop)
+            
+            if pred_id == target_id:
+                filtered_bbox.append(bbox)
+            
+        return filtered_bbox
+    
+    def update_draw_location(self, detected_objects, frame):
+        detected_bbox = [obj.bbox for obj in detected_objects if obj.label in self.labels_of_interest]
+        
+        if len(detected_bbox) > 0:
+            # Filter only bboxes of current player team class
+            filtered_bbox = self.filter_detections_by_class(detected_bbox, frame)
+            
+            if len(filtered_bbox) > 0:
+                bbox_areas = np.array([(box[2] - box[0]) * (box[3] - box[1]) for box in filtered_bbox])
+                
+                index_max_area = np.argmax(bbox_areas)
+                self.max_bbox = filtered_bbox[index_max_area]
+                
+                self.draw_object(self.max_bbox, frame)
+            else:
+                self.max_bbox = None
+        else:
+            self.max_bbox = None
+
+    def draw_object(self, bbox, frame):
+        color = self.color
+        text = f'Team {self.team_letter.upper()}'
+        
+        xmin, ymin, xmax, ymax = [int(x) for x in bbox]
+        # Define colors and font for the bounding box and label
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        font_thickness = 2
+
+        # Draw the bounding box
+        frame = cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
+
+        # Calculate text size for background
+        (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, font_thickness)
+        
+        # Draw background for text for better visibility
+        frame = cv2.rectangle(frame, (xmin, ymin - 20), (xmin + text_width, ymin), color, -1)
+
+        # Put the text (label) on the frame
+        frame = cv2.putText(frame, text, (xmin, ymin - 5), font, font_scale, (255, 255, 255), font_thickness)
+        
+# Ball class ------------------------------------------------------------------
+class Ball:
     def __init__(self, config):
-        self.model = YOLO(config["yolo_model_path"])
+        self.color = (255, 255, 255)
+        self.last_team_id = None
+        self.center_point = None
         
-    def detect(self, frame, verbose=False, conf=0.5, imgsz=640):
-        yolo_detections = self.model.predict(frame, verbose=verbose, conf=conf, imgsz=imgsz)
-        detected_objects = self.compute_detected_objects(yolo_detections)
+        self.labels_of_interest = config['ball_labels']
         
-        return detected_objects
-
-    def compute_detected_objects(self, yolo_detections):
-        detected_objects = []
-        detections_as_xyxy = yolo_detections[0].boxes.xyxy
-        labels = yolo_detections[0].boxes.cls
-
-        for lbl, det_xyxy in zip(labels, detections_as_xyxy):
-            det_xyxy = det_xyxy.cpu().numpy()
-            lbl = int(lbl.cpu().numpy())
-
-            x1, y1, x2, y2 = det_xyxy
-            det_object = DetectedObject(det_xyxy, lbl)
-            detected_objects.append(det_object)
+    def update_draw_location(self, players_obj, detected_objects, frame):
+        detected_bbox = [obj.bbox for obj in detected_objects if obj.label in self.labels_of_interest]
         
-        return detected_objects
+        if len(detected_bbox) > 0:
+            bbox_areas = np.array([(box[2] - box[0]) * (box[3] - box[1]) for box in detected_bbox])
+            
+            index_max_area = np.argmax(bbox_areas)
+            max_bbox = detected_bbox[index_max_area]
+            center_x = int((max_bbox[0] + max_bbox[2]) / 2)
+            center_y = int((max_bbox[1] + max_bbox[3]) / 2)
+            
+            self.center_point = (center_x, center_y)
+            
+            for player in players_obj:
+                if player.max_bbox is not None:
+                    px1, py1, px2, py2 = player.max_bbox
+                    
+                    if (center_x > px1) and (center_x < px2):
+                        if (center_y > py1 + 2*py2/3) and (center_y < py2):
+                            self.color = player.color
+                            self.last_team_id = player.team_id
+                    
+            self.draw_object(max_bbox, frame)
+        else:
+            self.center_point = None
+            
+    def draw_object(self, bbox, frame):
+        color = self.color
+        
+        # Calculate the center and size of the bounding box
+        center_x = int((bbox[0] + bbox[2]) / 2)
+        center_y = int((bbox[1] + bbox[3]) / 2)
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+    
+        # Determine the radius as half the smaller of the width or height
+        radius = int(min(width, height) / 2)
+    
+        # Draw the circle
+        cv2.circle(frame, (center_x, center_y), radius, color, -1)
+        
+# Video processor class -------------------------------------------------------
+class VideoProcessor:
+    def __init__(self, config, object_detector, goal_polygon, team_players_list, ball_object):
+        self.config = config
+        self.object_detector = object_detector
+        
+        self.goal_polygon = goal_polygon
+        self.team_players_list = team_players_list
+        self.ball_object = ball_object
+        
+    def process_frame(self, frame):
+        self.goal_polygon.draw_polygon_on_frame(frame)
+        detected_objects = self.object_detector.detect(frame)
+        
+        for player in team_players_list:
+            player.update_draw_location(detected_objects, frame)
+        
+        self.ball_object.update_draw_location(team_players_list, detected_objects, frame)
+        
+        self.goal_polygon.update_draw_score(self.ball_object, frame)
 
+        return frame
+        
+    def process_video(self):
+        cap = cv2.VideoCapture(self.config['input_video_path'])
+    
+        # Check if video opened successfully
+        if not cap.isOpened():
+            print("Error opening video stream or file")
+            return
+        
+        # Get video frame width, height, and FPS for the output video
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        
+        # Define the codec and create VideoWriter object
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
+        out = cv2.VideoWriter(self.config['output_video_path'], fourcc, fps, (frame_width, frame_height))
+    
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        with tqdm(total=total_frames, desc="Processing video frames") as pbar:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if ret:
+                    processed_frame = self.process_frame(frame)
+                    out.write(processed_frame)
+    
+                    # Display the single composite window
+                    cv2.imshow("Detections", processed_frame)
+                    
+                    # Check if 'ESC' key was pressed
+                    if cv2.waitKey(1) & 0xFF == 27:  # 27 is the ASCII value for 'ESC'
+                        break
+    
+                    pbar.update(1)
+                else:
+                    break
+
+    	# Release everything if job is finished
+        cap.release()
+        out.release()
+        cv2.destroyAllWindows()
 
 # Main function ===============================================================
 if __name__ == "__main__":
-    # 1. Setup
+    # 1. Setup ----------------------------------------------------------------
     config = {
-        'input_video_path': '../../../Datasets/demo/demo_v2_sliced.mp4',
-        'input_layout_image': '../../../Datasets/soccer field layout/soccer_field_layout.png',
-        'yolo_model_path': '../../../Models/yolov8-demo-model/train/weights/best.pt',
-        'output_base_dir': '../outputs'
+        'input_video_path': r'C:\Users\shysk\Documents\soccer-analytics\Datasets\demo\demo_v2_sliced.mp4',
+        'input_layout_image': r'C:\Users\shysk\Documents\soccer-analytics\Datasets\soccer field layout\soccer_field_layout.png',
+        'yolo_model_path': r'C:\Users\shysk\Documents\soccer-analytics\Models\yolov8-demo-model\train\weights\best.pt',
+        'output_base_dir': r'C:\Users\shysk\Documents\soccer-analytics\Usage\soccer-demo\outputs',
+        'player_labels': [2, 3],
+        'ball_labels': [1],
+        'n_classes': 2
     }
     
     config = create_output_dirs(config)
@@ -506,21 +762,31 @@ if __name__ == "__main__":
     object_detector = ObjectDetector(config)
     
     # HSV Ranges setup
-    hsv_setup = HSVRangeSetup(config, n_classes=2, labels_of_interest=[2, 3])
-    hsv_ranges = hsv_setup.setup_hsv_ranges(object_detector)
+    hsv_setup = HSVRangeSetup(config)
+    teams_dict = hsv_setup.setup_hsv_ranges(object_detector)
     
+    # Include the paths to the heatmap images and videos
+    config = create_heatmaps_dirs(config, teams_dict)
+
     # H Matrix setup
     homography_setup = HomographySetup(config)
     H = homography_setup.compute_homography_matrix()
     
+    #2. Analysis stage --------------------------------------------------------
     # Goal polygon setup
-    goal_polygon = GoalPolygon(config)
+    goal_polygon = GoalPolygon(config, teams_dict)
+    
+    # Team players list
+    team_players_list = [TeamPlayer(config, key, teams_dict) for key in teams_dict.keys()]
+    
+    # Create ball object
+    ball_object = Ball(config)
+    
+    # Create video processing object and process video
+    processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object)
+    processor.process_video()
     
     
-    
-    
-    
-
 
 
 
