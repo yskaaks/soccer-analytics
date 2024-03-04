@@ -33,7 +33,7 @@ To set up and run the Soccer Players Analysis System on your local machine, foll
 First, clone the repository to your local machine using Git. Open a terminal or command prompt and run the following command:
 
 ```bash
-git clone git@github.com:yskaaks/terralink-soccer-analytics.git
+git clone git@github.com:yskaaks/soccer-analytics.git
 cd soccer-players-analysis
 ```
 Where `soccer-players-analysis` should be the path to the directory where the repository was cloned in your local machine.
@@ -155,43 +155,44 @@ These outputs provide comprehensive visual analytics of player movements and tea
 
 ## Demo
 
-This section introduces the demo scripts developed to showcase the application of the Soccer Players Analysis System on a specific video. This demo provides a practical example of the system’s capabilities in analyzing and visualizing soccer matches.
+The demo section provides a practical guide to running the Soccer Players Analysis System with the `main.py` script. This script showcases the system's capabilities, including player detection, tracking, team classification, and field homography, using computer vision techniques.
 
-### `main_v2.py` - 2D Projection and Heatmap Generation
+![Demo full](Resources/demo_analytics.gif)
 
-The `main_v2.py` script demonstrates the system’s ability to project players and the ball onto a 2D representation of the soccer field, along with generating heatmaps for player movements. Utilizing the Ultralytics YOLO model for player detection, the script applies homography transformations to accurately map detected objects onto the field. This offers a unique perspective on the game, highlighting player distributions and movement patterns throughout the match.
+### Getting Started
 
-Key Features:
-- **Player and Ball Detection**: Leverages the YOLO object detection model to identify players and the ball in video frames.
-- **Homography Transformation**: Employs a sophisticated algorithm to transform the detected objects’ positions onto a 2D soccer field layout.
-- **Heatmap Visualization**: Generates heatmaps for both teams, visualizing player activity and movement patterns over time.
+Before running the demo, ensure you've followed the [Installation](#installation) instructions to set up the necessary environment and dependencies.
 
-Usage:
-To run the script, ensure the project environment is activated and navigate to the source directory. Execute the following command:
+### Basic Demo Usage
+
+To run the demo with a custom video, navigate to the demo directory and execute the `main.py` script, specifying the path to your video. This example uses the default parameter values except for the input video path:
 
 ```bash
-python main_v2.py
+cd soccer-players-analysis/Usage/soccer-demo/src
+python main.py --input_video_path "path/to/your/video.mp4"
 ```
 
-![demo_v2](Resources/demo_v2_visualization.gif)
+Replace `"path/to/your/video.mp4"` with the actual path to your video file.
 
-### `main_v3.py` - Goal Tracking with User-Defined Areas
+### Advanced Demo Usage
 
-The `main_v3.py` script is crafted to enhance the Soccer Players Analysis System by introducing the capability to track goals scored by each player. It allows users to define a polygonal goal area within the video frame, and the script monitors these areas to detect and attribute goals during a match.
-
-Key Features:
-- **Goal Detection**: Employs the YOLO object detection model in tandem with Norfair tracking to monitor the defined goal areas for scoring activities.
-- **User-Defined Goal Areas**: Provides flexibility in setting custom polygon areas that represent the goal, accommodating various camera angles and field setups.
-- **Score Attribution**: Accurately keeps track of goals scored by each team, enriching match analysis with crucial scoring events.
-
-Usage:
-To utilize this script, ensure the project environment is active and navigate to the source directory. Execute the script with the following command:
+For a more customized analysis, you can specify additional parameters. The following command demonstrates how to change all available parameters, tailoring the analysis to your specific requirements:
 
 ```bash
-python main_v3.py
+cd soccer-players-analysis/Usage/soccer-demo/src
+python main.py --input_video_path "path/to/your/video.mp4" --player_labels 2 3 --ball_labels 1 --n_classes 2 --input_layout_image "path/to/layout/image.png" --yolo_model_path "path/to/yolo/model/best.pt" --output_base_dir "path/to/outputs"
 ```
 
-![demo_v3](Resources/demo_v3_visualization.gif)
+Make sure to replace the placeholder paths and values with those relevant to your setup.
+
+### What to Expect
+
+- **Player Detection and Tracking**: The system uses YOLOv8 for detecting and tracking players, highlighted by bounding boxes.
+- **Team Classification**: Teams are classified based on jersey colors. This is visualized by the color of the bounding boxes around players.
+- **Field Homography**: Players' positions are mapped onto a 2D soccer field layout, demonstrating the system's ability to analyze spatial dynamics.
+- **Outputs**: The demo saves various outputs, including processed videos, heatmaps, and tracking data, to the specified output directory.
+
+![Demo grid](Resources/demo_grid.gif)
 
 ## Notebooks
 The Jupyter notebooks within the `Notebooks` directory guide users through leveraging the system's functionalities for a comprehensive analysis of soccer players:
