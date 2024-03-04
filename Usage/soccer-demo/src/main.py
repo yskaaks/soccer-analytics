@@ -8,6 +8,8 @@ import math
 import sys
 from tqdm import tqdm
 import string
+import csv
+import argparse
 
 # Utility functions ===========================================================
 def create_output_dirs(config):
@@ -31,6 +33,8 @@ def create_output_dirs(config):
     config['output_video_path'] = os.path.join(output_video_dir, 'scores_video.mp4')
     config['layout_video_path'] = os.path.join(output_video_dir, 'layout_video.mp4')
     config['output_csv'] = os.path.join(output_video_dir, 'soccer_analytics.csv')
+    config['output_report'] = os.path.join(output_video_dir, 'soccer_analytics_report.json')
+    
     
     return config
 
@@ -51,6 +55,89 @@ def create_heatmaps_dirs(config, teams_dict):
     config['output_image_heatmaps'] = heatmap_image_path_dict
         
     return config
+
+# CSV Writer class ============================================================
+class CsvWriter:
+    def __init__(self, config):
+        """
+        Initializes the CsvWriter object, setting up the file path.
+
+        :param config: Configuration dictionary containing 'output_csv' as the path to the CSV file.
+        """
+        self.file_path = config['output_csv']
+        # Ensure the CSV starts fresh when the object is created
+        self.ensure_fresh_start()
+
+    def ensure_fresh_start(self):
+        """
+        Removes existing CSV file if it exists to start fresh.
+        """
+        if os.path.isfile(self.file_path):
+            os.remove(self.file_path)
+
+    def update_csv(self, analytics_dict):
+        """
+        Updates the CSV file by appending a new row with the latest data.
+
+        :param analytics_dict: Dictionary with analytics' names as keys and their values as lists.
+        """
+        # Automatically determine the frame number based on the length of any list in the analytics_dict
+        frame_number = len(next(iter(analytics_dict.values()))) if analytics_dict else 1
+
+        # Check if this is the first update and initialize the file with headers
+        if not os.path.isfile(self.file_path) or os.stat(self.file_path).st_size == 0:
+            self.initialize_csv(analytics_dict)
+        
+        # Append the latest data for the current frame
+        self.append_latest_data(frame_number, analytics_dict)
+
+    def initialize_csv(self, analytics_dict):
+        """
+        Initializes the CSV file with headers based on the analytics_dict keys.
+        """
+        with open(self.file_path, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            # Initialize header with 'frame' as the first column, followed by analytics names
+            headers = ['frame'] + list(analytics_dict.keys())
+            writer.writerow(headers)
+
+    def append_latest_data(self, frame_number, analytics_dict):
+        """
+        Appends the latest data for the current frame to the CSV file.
+        """
+        with open(self.file_path, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            # Prepare the row data starting with the frame number
+            row_data = [frame_number] + [analytics_dict[analytic][-1] if analytics_dict[analytic] else None for analytic in analytics_dict]
+            writer.writerow(row_data)
+            
+# TXT writer for final analytics report =======================================
+class ReportWriter:
+    def __init__(self, config):
+        self.file_path = config['output_report']
+        # Ensure the CSV starts fresh when the object is created
+        self.ensure_fresh_start()
+
+    def ensure_fresh_start(self):
+        """
+        Removes existing json file if it exists to start fresh.
+        """
+        if os.path.isfile(self.file_path):
+            os.remove(self.file_path)
+            
+    def update_report(self, scores_dict, ball_poss_dict):
+        report_dict = {key: {} for key in scores_dict.keys()}
+        
+        for key, value in scores_dict.items():
+            report_dict[key]['score'] = value
+        
+        for key, value in ball_poss_dict.items():
+            report_dict[key]['time'] = value['time']
+            
+        # Writing my_dict to a file in JSON format
+        with open(self.file_path, 'w') as file:
+            json.dump(report_dict, file, indent=4)
+        
 
 # Setup stage =================================================================
 # HSV ranges per class --------------------------------------------------------
@@ -377,13 +464,18 @@ class GoalPolygon:
         self.load_and_draw_polygon()
         self.ball_in = False
         
-        self.teams_dict = self.initialize_teams_scores(teams_dict)
+        self.teams_dict, self.scores_dict = self.initialize_teams_scores(teams_dict)
         
     def initialize_teams_scores(self, teams_dict):
+        scores_dict = {}
+        
         for key in teams_dict.keys():
             teams_dict[key]['score'] = 0
             
-        return teams_dict
+            team_letter = teams_dict[key]['team_letter']
+            scores_dict[team_letter] = 0
+            
+        return teams_dict, scores_dict
         
     def load_polygon_if_exists(self):
         polygon_path = self.config['goal_polygon_path']
@@ -474,6 +566,7 @@ class GoalPolygon:
                 
                 if team_id in self.teams_dict:
                     self.teams_dict[team_id]['score'] += 1
+                    self.scores_dict[self.teams_dict[team_id]['team_letter']] = self.teams_dict[team_id]['score']
             if self.ball_in and result == -1:
                 self.ball_in = False
             
@@ -708,6 +801,7 @@ class LayoutProjector:
         
         self.H = H
         self.layout_dict, self.ball_poss_dict = self.initialize_layout_dict(teams_dict)
+        self.fps = 0
         
     def initialize_heatmaps_dict(self, teams_dict):
         heatmap_zeros = np.zeros((self.layout_image.shape[0], self.layout_image.shape[1]), dtype=np.float32)
@@ -727,13 +821,23 @@ class LayoutProjector:
         return layout_img, layout_img_gray    
     
     def initialize_layout_dict(self, teams_dict):
-        ball_poss_dict = {teams_dict[key]['team_letter']: {'color': teams_dict[key]['bgr_color'], 'frames_count': 0} for key in teams_dict.keys()}
+        ball_poss_dict = {teams_dict[key]['team_letter']: {'color': teams_dict[key]['bgr_color'], 'frames_count': 0, 'time': '00:00'} for key in teams_dict.keys()}
         
         layout_dict = {teams_dict[key]['team_letter']: [] for key in teams_dict.keys()}
         layout_dict['ball'] = []
         layout_dict['ball_possession'] = []
         
         return layout_dict, ball_poss_dict
+    
+    def convert_frames_to_time(self):
+        for value in self.ball_poss_dict.values():
+            frame_count = value['frames_count']
+            current_time = frame_count / self.fps  # Time in seconds
+            minutes = int(current_time // 60)
+            seconds = int(current_time % 60)
+            time_str = f"{minutes:02d}:{seconds:02d}"  # Format time as mm:ss
+            
+            value['time'] = time_str
     
     def update_draw_layout_dict(self, team_players_list, ball_object):
         temp_layout_dict = {}
@@ -750,6 +854,7 @@ class LayoutProjector:
         
         if ball_object.last_team_letter is not None:
             self.ball_poss_dict[ball_object.last_team_letter]['frames_count'] += 1
+            self.convert_frames_to_time()
             
         self.layout_dict['ball_possession'].append(ball_object.last_team_letter)
         
@@ -824,7 +929,7 @@ class LayoutProjector:
         else:
             return point
         
-    def update_draw_possession_time(self, frame, fps):
+    def update_draw_possession_time(self, frame):
         # Calculate the dimensions of the frame and the text boxes
         frame_height, frame_width = frame.shape[:2]
         offset_x = 10  # Offset from the right edge
@@ -854,14 +959,10 @@ class LayoutProjector:
         # Initialize the y-coordinate for the team boxes to be below the "POSSESSION" label
         initial_top_left_y = offset_y + label_height
     
-        for index, (team_letter, values) in enumerate(sorted(self.ball_poss_dict.items(), key=lambda x: x[0])):
+        for index, (team_letter, values) in enumerate(sorted(self.ball_poss_dict.items(), key=lambda x: x[0], reverse=True)):
             color = values['color']
-            frame_count = values['frames_count']
-            current_time = frame_count / fps  # Time in seconds
-            minutes = int(current_time // 60)
-            seconds = int(current_time % 60)
-            time_str = f"{minutes:02d}:{seconds:02d}"  # Format time as mm:ss
-    
+            time_str = values['time']
+            
             # Draw the team-specific possession time boxes
             top_right_x = frame_width - offset_x - (box_width * (index + 1))
             cv2.rectangle(frame, (top_right_x, initial_top_left_y), (top_right_x + box_width, initial_top_left_y + label_box_height), color, -1)
@@ -886,7 +987,10 @@ class LayoutProjector:
 
 # Video processor class =======================================================
 class VideoProcessor:
-    def __init__(self, config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector):
+    def __init__(self, config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector, csv_writer, report_writer):
+        self.csv_writer = csv_writer
+        self.report_writer = report_writer
+        
         self.config = config
         self.object_detector = object_detector
         
@@ -909,8 +1013,13 @@ class VideoProcessor:
         self.goal_polygon.update_draw_score(self.ball_object, frame)
         
         drawn_layout, overlay_heatmaps_dict = self.layout_projector.update_draw_layout_dict(self.team_players_list, self.ball_object)
-        frame = self.layout_projector.update_draw_possession_time(frame, self.fps)
+        frame = self.layout_projector.update_draw_possession_time(frame)
         
+        self.csv_writer.update_csv(self.layout_projector.layout_dict)
+        
+        
+        self.report_writer.update_report(self.goal_polygon.scores_dict, self.layout_projector.ball_poss_dict)
+
         return frame, drawn_layout, overlay_heatmaps_dict
         
     def process_video(self):
@@ -925,6 +1034,7 @@ class VideoProcessor:
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.fps = cap.get(cv2.CAP_PROP_FPS)
+        self.layout_projector.fps = self.fps
         
         # Define the codec and create VideoWriter object
         self.fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
@@ -955,6 +1065,7 @@ class VideoProcessor:
                         break
     
                     pbar.update(1)
+
                 else:
                     break
 
@@ -967,6 +1078,10 @@ class VideoProcessor:
             out_wirter.release()
         
         cv2.destroyAllWindows()
+        
+        # Save final heatmaps
+        for key, heatmap in overlay_heatmaps_dict.items():
+            cv2.imwrite(config['output_image_heatmaps'][key], heatmap)
         
     def initialize_heatmap_layout_output_writers(self):
         heatmap_outs_dict = {}
@@ -983,19 +1098,42 @@ class VideoProcessor:
 
 # Main function ===============================================================
 if __name__ == "__main__":
+    # Initialize the parser
+    parser = argparse.ArgumentParser(description='Process video analysis with custom configuration.')
+
+    # Adding arguments
+    parser.add_argument('--input_video_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\demo\demo_v2_sliced.mp4', help='Path to input video')
+    parser.add_argument('--player_labels', nargs='+', type=int, default=[2, 3], help='Player labels')
+    parser.add_argument('--ball_labels', nargs='+', type=int, default=[1], help='Ball labels')
+    parser.add_argument('--n_classes', type=int, default=2, help='Number of classes')
+    parser.add_argument('--input_layout_image', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\soccer field layout\soccer_field_layout.png', help='Path to input layout image')
+    parser.add_argument('--yolo_model_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Models\yolov8-demo-model\train\weights\best.pt', help='Path to YOLO model')
+    parser.add_argument('--output_base_dir', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Usage\soccer-demo\outputs', help='Base directory for outputs')
+
+    # Parse the arguments
+    args = parser.parse_args()
+
     # 1. Setup ----------------------------------------------------------------
+    # Update the config dictionary with arguments from the command line
     config = {
-        'input_video_path': r'C:\Users\shysk\Documents\soccer-analytics\Datasets\demo\demo_v2_sliced.mp4',
-        'input_layout_image': r'C:\Users\shysk\Documents\soccer-analytics\Datasets\soccer field layout\soccer_field_layout.png',
-        'yolo_model_path': r'C:\Users\shysk\Documents\soccer-analytics\Models\yolov8-demo-model\train\weights\best.pt',
-        'output_base_dir': r'C:\Users\shysk\Documents\soccer-analytics\Usage\soccer-demo\outputs',
-        'player_labels': [2, 3],
-        'ball_labels': [1],
-        'n_classes': 2
+        'input_video_path': args.input_video_path,
+        'player_labels': args.player_labels,
+        'ball_labels': args.ball_labels,
+        'n_classes': args.n_classes,
+        'input_layout_image': args.input_layout_image,
+        'yolo_model_path': args.yolo_model_path,
+        'output_base_dir': args.output_base_dir,
     }
+    
     config = create_output_dirs(config)
     
     object_detector = ObjectDetector(config)
+    
+    # CSV writer
+    csv_writer = CsvWriter(config)
+    
+    # TXT Report Writer
+    report_writer = ReportWriter(config)
     
     # HSV Ranges setup
     hsv_setup = HSVRangeSetup(config)
@@ -1022,5 +1160,5 @@ if __name__ == "__main__":
     ball_object = Ball(config)
     
     # Create video processing object and process video
-    processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector)
+    processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector, csv_writer, report_writer)
     processor.process_video()
