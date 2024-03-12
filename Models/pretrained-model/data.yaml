@@ -1,0 +1,13 @@
+train: /content/drive/MyDrive/soccer-players-detection-yolov8/train/images
+val: /content/drive/MyDrive/soccer-players-detection-yolov8/valid/images
+test: /content/drive/MyDrive/soccer-players-detection-yolov8/test/images
+
+nc: 4
+names: ['ball', 'goalkeeper', 'referee', 'soccer-player']
+
+roboflow:
+  workspace: smart-football-object-detection
+  project: smart-football-object-detection
+  version: 11
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/smart-football-object-detection/smart-football-object-detection/dataset/11
