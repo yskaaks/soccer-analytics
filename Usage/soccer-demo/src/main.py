@@ -10,10 +10,12 @@ from tqdm import tqdm
 import string
 import csv
 import argparse
-import streamlit as st
-import tempfile
-import time
 
+import time
+import socket
+import struct
+import pickle
+import asyncio
 
 # Utility functions ===========================================================
 def create_output_dirs(config):
@@ -245,37 +247,37 @@ class HSVRangeSetup:
     def setup_hsv_ranges(self, object_detector):
         if os.path.exists(self.config.get('hsv_ranges_path', '')):
             return self.load_hsv_ranges(self.config['hsv_ranges_path'])
-
+    
         detected_crops = self.extract_and_detect_frames(self.config['input_video_path'],
                                                         object_detector,
                                                         self.labels_of_interest)
-
+    
         concatenated_crops = self.scale_and_concat_crops(detected_crops)
         segmentation = VideoSegmentation('Segmentation')
         hsv_ranges_dict = {}
-        alphabet = iter(string.ascii_lowercase)
-
-        st.write("Instructions:")
-        st.write("- Press 'y' if you are satisfied with the HSV range and want to move to the next class.")
-        st.write("- Press 'Esc' to exit the program.")
-
+        alphabet = iter(string.ascii_lowercase)  # Create an iterator over the alphabet
+    
+        print("Instructions:")
+        print("- Press 'y' if you are satisfied with the HSV range and want to move to the next class.")
+        print("- Press 'Esc' to exit the program.")
+    
         for _ in range(self.n_classes):
             while True:
                 lower_bound, upper_bound = segmentation.update_segmentation(concatenated_crops)
-                segmented = cv2.inRange(cv2.cvtColor(concatenated_crops, cv2.COLOR_BGR2HSV), lower_bound, upper_bound)
-                st.image(segmented, caption="Segmented Crops")
-
-                key = st.text_input("Enter command:")
-                if key.lower() == 'y':
+                key = cv2.waitKey(1) & 0xFF
+    
+                if key == ord('y'):
                     unique_id = self.generate_unique_id(lower_bound, upper_bound)
+                    # Calculate the midpoint of the hue range for RGB color
                     mid_hue = (lower_bound[0] + upper_bound[0]) / 2
                     mid_hsv_color = np.array([[[int(mid_hue), 255, 255]]], dtype=np.uint8)
                     mid_rgb_color = cv2.cvtColor(mid_hsv_color, cv2.COLOR_HSV2BGR)[0][0].tolist()
-
+                    
+                    # Assign a letter from the alphabet to this unique_id
                     team_letter = next(alphabet, None)
                     if team_letter is None:
                         raise ValueError("Exceeded alphabet limit for unique team letters.")
-
+                    
                     hsv_ranges_dict[unique_id] = {
                         'lower_bound': lower_bound.tolist(),
                         'upper_bound': upper_bound.tolist(),
@@ -283,12 +285,13 @@ class HSVRangeSetup:
                         'team_letter': team_letter
                     }
                     break
-                elif key.lower() == 'esc':
-                    st.write("Exiting without saving the HSV ranges.")
-                    return None
-
+                elif key == 27:  # Escape key
+                    cv2.destroyAllWindows()
+                    sys.exit()
+    
             segmentation.reset_trackbars()
-
+    
+        cv2.destroyAllWindows()
         self.save_hsv_ranges(hsv_ranges_dict, self.config['hsv_ranges_path'])
         return self.load_hsv_ranges(self.config['hsv_ranges_path'])
 
@@ -382,32 +385,36 @@ class HomographySetup:
         self.padded_layout_img, self.padded_first_frame, concatenated_img = self.prepare_images_for_display()
         max_width = max(self.layout_img.shape[1], self.first_frame.shape[1])
 
-        st.image(concatenated_img, channels="BGR", caption="Homography Points Selection")
+        cv2.namedWindow("Homography Points Selection", cv2.WINDOW_NORMAL)
+        cv2.imshow("Homography Points Selection", concatenated_img)
+        cv2.setMouseCallback("Homography Points Selection", self.click_event, (concatenated_img, max_width))
 
-        st.write("Instructions:")
-        st.write("- Click corresponding points on the layout image and the video frame.")
-        st.write("- Press 'y' to confirm and calculate homography.")
-        st.write("- Press 'Esc' to quit.")
-        st.write("- Press 'r' to remove the last point match.")
+        print("Instructions:")
+        print("- Click corresponding points on the layout image and the video frame.")
+        print("- Press 'y' to confirm and calculate homography.")
+        print("- Press 'Esc' to quit.")
+        print("- Press 'r' to remove the last point match.")
 
         while True:
-            key = st.text_input("Enter command:")
-            if key.lower() == 'y':
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:  # Esc key
+                cv2.destroyAllWindows()
+                return None  # Return early since homography cannot be computed
+            elif key == ord('y'):
                 if len(self.points_layout) >= 4 and len(self.points_frame) >= 4:
                     H, _ = cv2.findHomography(np.array(self.points_frame), np.array(self.points_layout))
                     if self.config['h_matrix_path']:
                         np.save(self.config['h_matrix_path'], H)
+                    cv2.destroyAllWindows()
                     return H
                 else:
-                    st.write("Not enough points to compute homography.")
-            elif key.lower() == 'esc':
-                st.write("Exiting without computing homography.")
-                return None
-            elif key.lower() == 'r' and self.points_layout and self.points_frame:
+                    print("Not enough points to compute homography.")
+                    cv2.destroyAllWindows()
+                    return None  # Return early since homography cannot be computed
+            elif key == ord('r') and self.points_layout and self.points_frame:  # Remove the last point match
                 self.points_layout.pop()
                 self.points_frame.pop()
                 self.update_display(concatenated_img, max_width)
-                st.image(concatenated_img, channels="BGR", caption="Homography Points Selection")
 
     def prepare_images_for_display(self):
         max_height = max(self.layout_img.shape[0], self.first_frame.shape[0])
@@ -433,7 +440,7 @@ class ObjectDetector:
         self.model = YOLO(config["yolo_model_path"])
         
     def detect(self, frame, verbose=False, conf=0.7, imgsz=640):
-        yolo_detections = self.model.predict(frame, verbose=verbose, conf=conf, imgsz=imgsz)
+        yolo_detections = self.model.predict(frame, verbose=verbose, conf=conf, imgsz=imgsz, task="detect")
         detected_objects = self.compute_detected_objects(yolo_detections)
         
         return detected_objects
@@ -983,6 +990,11 @@ class LayoutProjector:
             cv2.putText(frame, time_str, (time_text_x, time_text_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
     
         return frame
+    
+async def send_frame_async(conn, processed_frame, drawn_layout, overlay_heatmaps_dict):
+    data = pickle.dumps((processed_frame, drawn_layout))
+    message = struct.pack("Q", len(data)) + data
+    await conn.sendall(message)
 
 # Video processor class =======================================================
 class VideoProcessor:
@@ -1023,81 +1035,159 @@ class VideoProcessor:
         
     def process_video(self):
         cap = cv2.VideoCapture(self.config['input_video_path'])
-
+    
+        # Check if video opened successfully
         if not cap.isOpened():
-            st.write("Error opening video stream or file")
+            print("Error opening video stream or file")
             return
-
+        
+        # Get video frame width, height, and FPS for the output video
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.fps = cap.get(cv2.CAP_PROP_FPS)
         self.layout_projector.fps = self.fps
-
-        # Create columns for the tracking video and 2D layout video
-        col1, col2 = st.columns(2)
-        with col1:
-            stframe_processed = st.empty()
-        with col2:
-            stframe_layout = st.empty()
-
-        # Create columns for the heatmap videos
-        col3, col4 = st.columns(2)
-        stheatmaps = {}
-        for i, team_letter in enumerate(self.layout_projector.overlay_heatmaps_dict.keys()):
-            with col3 if i == 0 else col4:
-                stheatmaps[team_letter] = st.empty()
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            processed_frame, drawn_layout, overlay_heatmaps_dict = self.process_frame(frame)
-
-            # Display the processed frame and layout in real-time using Streamlit
-            stframe_processed.image(processed_frame, channels="BGR", use_column_width=True)
-            stframe_layout.image(drawn_layout, channels="BGR", use_column_width=True)
-
-            # Display the heatmap visualizations for each player in real-time using Streamlit
-            for team_letter, heatmap in overlay_heatmaps_dict.items():
-                stheatmaps[team_letter].image(heatmap, channels="BGR", use_column_width=True)
-
-            # Update the CSV file and report in real-time
-            self.csv_writer.update_csv(self.layout_projector.layout_dict)
-            self.report_writer.update_report(self.goal_polygon.scores_dict, self.layout_projector.ball_poss_dict)
-
-            # Wait for a small duration to control the processing speed
-            time.sleep(1 / self.fps)
-
-        cap.release()
-
-        # Clear the displayed frames and heatmaps
-        stframe_processed.empty()
-        stframe_layout.empty()
-        for stheatmap in stheatmaps.values():
-            stheatmap.empty()
-
-
-    def combine_frames(self, processed_frame, drawn_layout, overlay_heatmaps_dict):
-        # Resize the frames to have the same dimensions
-        processed_frame = cv2.resize(processed_frame, (drawn_layout.shape[1], drawn_layout.shape[0]))
-        heatmap_frames = [cv2.resize(heatmap, (drawn_layout.shape[1], drawn_layout.shape[0])) for heatmap in overlay_heatmaps_dict.values()]
-
-        # Combine the frames horizontally
-        combined_frame = np.hstack((processed_frame, drawn_layout, *heatmap_frames))
-
-        return combined_frame
-    
-    def combine_frames(self, processed_frame, drawn_layout, overlay_heatmaps_dict):
-        # Resize the frames to have the same dimensions
-        processed_frame = cv2.resize(processed_frame, (drawn_layout.shape[1], drawn_layout.shape[0]))
-        heatmap_frames = [cv2.resize(heatmap, (drawn_layout.shape[1], drawn_layout.shape[0])) for heatmap in overlay_heatmaps_dict.values()]
-
-        # Combine the frames horizontally
-        combined_frame = np.hstack((processed_frame, drawn_layout, *heatmap_frames))
-
-        return combined_frame
         
+        # Define the codec and create VideoWriter object
+        self.fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
+        out = cv2.VideoWriter(self.config['output_video_path'], self.fourcc, self.fps, (frame_width, frame_height))
+        heatmap_outs_dict, layout_out_writer = self.initialize_heatmap_layout_output_writers()
+        
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        with tqdm(total=total_frames, desc="Processing video frames") as pbar:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if ret:
+                    processed_frame, drawn_layout, overlay_heatmaps_dict = self.process_frame(frame)
+                    
+                    out.write(processed_frame)
+                    layout_out_writer.write(drawn_layout)
+    
+                    # Display the single composite window
+                    cv2.imshow("Detections", processed_frame)
+                    cv2.imshow("Layout", drawn_layout)
+                    
+                    for key, heatmap in overlay_heatmaps_dict.items():
+                        if heatmap.dtype != np.uint8:
+                            heatmap = cv2.convertScaleAbs(heatmap)
+                        heatmap_outs_dict[key].write(heatmap)
+                        cv2.imshow(key, heatmap)
+                    
+                    # Check if 'ESC' key was pressed
+                    if cv2.waitKey(1) & 0xFF == 27:  # 27 is the ASCII value for 'ESC'
+                        break
+    
+                    pbar.update(1)
+
+                else:
+                    break
+
+    	# Release everything if job is finished
+        cap.release()
+        out.release()
+        layout_out_writer.release()
+        
+        for out_wirter in heatmap_outs_dict.values():
+            out_wirter.release()
+        
+        cv2.destroyAllWindows()
+        
+        # Save final heatmaps
+        for key, heatmap in overlay_heatmaps_dict.items():
+            cv2.imwrite(config['output_image_heatmaps'][key], heatmap)
+        
+    def send_processed_video_frames(self, host='0.0.0.0', port=8080):
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind((host, port))
+        server_socket.listen()
+        print(f"Listening for client connections on {host}:{port}")
+
+        conn, addr = server_socket.accept()
+        print(f"Connection from {addr}")
+
+        cap = cv2.VideoCapture(self.config['input_video_path'])
+    
+        # Check if video opened successfully
+        if not cap.isOpened():
+            print("Error opening video stream or file")
+            return
+        
+        # Get video frame width, height, and FPS for the output video
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.fps = cap.get(cv2.CAP_PROP_FPS)
+        self.layout_projector.fps = self.fps
+        
+        # Define the codec and create VideoWriter object
+        self.fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
+        out = cv2.VideoWriter(self.config['output_video_path'], self.fourcc, self.fps, (frame_width, frame_height))
+        heatmap_outs_dict, layout_out_writer = self.initialize_heatmap_layout_output_writers()
+        
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        with tqdm(total=total_frames, desc="Processing video frames") as pbar:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if ret:
+                    processed_frame, drawn_layout, overlay_heatmaps_dict = self.process_frame(frame)
+                    
+                    out.write(processed_frame)
+                    layout_out_writer.write(drawn_layout)    
+                    
+                    for key, heatmap in overlay_heatmaps_dict.items():
+                        if heatmap.dtype != np.uint8:
+                            heatmap = cv2.convertScaleAbs(heatmap)
+                        heatmap_outs_dict[key].write(heatmap)
+                    
+                    small_processed_frame = cv2.resize(processed_frame, (0, 0), fx=0.5, fy=0.5)
+                    small_drawn_layout = cv2.resize(drawn_layout, (0, 0), fx=0.5, fy=0.5)
+
+                    heatmap_1 = overlay_heatmaps_dict['a']
+                    heatmap_2 = overlay_heatmaps_dict['b']
+
+                    small_heatmap_1 = cv2.resize(heatmap_1, (0, 0), fx=0.5, fy=0.5)
+                    small_heatmap_2 = cv2.resize(heatmap_2, (0, 0), fx=0.5, fy=0.5)
+                    _, jpeg_processed_frame = cv2.imencode('.jpg', small_processed_frame)
+                    _, jpeg_drawn_layout = cv2.imencode('.jpg', small_drawn_layout)
+                    _, jpeg_heatmap_1 = cv2.imencode('.jpg', small_heatmap_1)
+                    _, jpeg_heatmap_2 = cv2.imencode('.jpg', small_heatmap_2)
+
+                    processed_frame_bytes = jpeg_processed_frame.tobytes()
+                    drawn_layout_bytes = jpeg_drawn_layout.tobytes()
+                    heatmap_1_bytes = jpeg_heatmap_1.tobytes()
+                    heatmap_2_bytes = jpeg_heatmap_2.tobytes()
+
+                    # data = 
+
+                    # Packing the processed_frame, drawn_layout, and images in overlay_heatmaps_dict
+                    start_time = time.time()
+                    data = pickle.dumps((small_processed_frame, small_drawn_layout, small_heatmap_1, small_heatmap_2))
+                    message = struct.pack("Q", len(data)) + data
+                    # check size of message in bytes
+                    # print(f"Message size: {len(message):,} bytes")
+                    conn.sendall(message)
+                    # print(f"Time to send frame: {time.time() - start_time}")
+    
+                    pbar.update(1)
+
+                else:
+                    break
+
+    	# Release everything if job is finished
+        cap.release()
+        out.release()
+        layout_out_writer.release()
+        
+        for out_wirter in heatmap_outs_dict.values():
+            out_wirter.release()
+        
+        cv2.destroyAllWindows()
+        
+        # Save final heatmaps
+        for key, heatmap in overlay_heatmaps_dict.items():
+            cv2.imwrite(config['output_image_heatmaps'][key], heatmap)
+    
     def initialize_heatmap_layout_output_writers(self):
         heatmap_outs_dict = {}
         
@@ -1111,29 +1201,35 @@ class VideoProcessor:
         
         return heatmap_outs_dict, layout_out_writer
 
-def main():
-    st.title("Soccer Players Analysis System")
-    
-    input_video_path = st.text_input("Path to input video",r'C:\Users\shysk\Documents\soccer-analytics\Datasets\demo\demo_v2_sliced.mp4')
-    player_labels = st.multiselect("Player labels", [1, 2, 3], default=[2, 3])
-    ball_labels = st.multiselect("Ball labels", [1, 2, 3], default=[1])
-    n_classes = st.number_input("Number of classes", min_value=1, value=2)
-    input_layout_image = st.text_input("Path to input layout image", r'C:\Users\shysk\Documents\soccer-analytics\Datasets\soccer field layout\soccer_field_layout.png')
-    yolo_model_path = st.text_input("Path to YOLO model",r'C:\Users\shysk\Documents\soccer-analytics\Models\yolov8-demo-model\train\weights\best.pt')
-    output_base_dir = st.text_input("Base directory for outputs", r'C:\Users\shysk\Documents\soccer-analytics\Usage\soccer-demo\outputs')
-    
-    # Update the config dictionary
+# Main function ===============================================================
+if __name__ == "__main__":
+    # Initialize the parser
+    parser = argparse.ArgumentParser(description='Process video analysis with custom configuration.')
+
+    # Adding arguments
+    parser.add_argument('--input_video_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\demo\demo_v2_sliced.mp4', help='Path to input video')
+    parser.add_argument('--player_labels', nargs='+', type=int, default=[2, 3], help='Player labels')
+    parser.add_argument('--ball_labels', nargs='+', type=int, default=[1], help='Ball labels')
+    parser.add_argument('--n_classes', type=int, default=2, help='Number of classes')
+    parser.add_argument('--input_layout_image', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\soccer field layout\soccer_field_layout.png', help='Path to input layout image')
+    parser.add_argument('--yolo_model_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Models\yolov8-demo-model\train\weights\best_nano.pt', help='Path to YOLO model')
+    parser.add_argument('--output_base_dir', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Usage\soccer-demo\outputs\demo_v2_sliced', help='Base directory for outputs')
+
+    # Parse the arguments
+    args = parser.parse_args()
+
+    # 1. Setup ----------------------------------------------------------------
+    # Update the config dictionary with arguments from the command line
     config = {
-        'input_video_path': input_video_path,
-        'player_labels': player_labels,
-        'ball_labels': ball_labels,
-        'n_classes': n_classes,
-        'input_layout_image': input_layout_image,
-        'yolo_model_path': yolo_model_path,
-        'output_base_dir': output_base_dir,
+        'input_video_path': args.input_video_path,
+        'player_labels': args.player_labels,
+        'ball_labels': args.ball_labels,
+        'n_classes': args.n_classes,
+        'input_layout_image': args.input_layout_image,
+        'yolo_model_path': args.yolo_model_path,
+        'output_base_dir': args.output_base_dir,
     }
-
-
+    
     config = create_output_dirs(config)
     
     object_detector = ObjectDetector(config)
@@ -1168,75 +1264,6 @@ def main():
     # Create ball object
     ball_object = Ball(config)
     
-    if st.button("Start Analysis"):
-        # Create video processing object and process video
-        processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector, csv_writer, report_writer)
-        processor.process_video()
-    
-# Main function ===============================================================
-if __name__ == "__main__":
-    # Initialize the parser
-    main()
-    # parser = argparse.ArgumentParser(description='Process video analysis with custom configuration.')
-
-#     # Adding arguments
-#     parser.add_argument('--input_video_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\demo\demo_v2_sliced.mp4', help='Path to input video')
-#     parser.add_argument('--player_labels', nargs='+', type=int, default=[2, 3], help='Player labels')
-#     parser.add_argument('--ball_labels', nargs='+', type=int, default=[1], help='Ball labels')
-#     parser.add_argument('--n_classes', type=int, default=2, help='Number of classes')
-#     parser.add_argument('--input_layout_image', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\soccer field layout\soccer_field_layout.png', help='Path to input layout image')
-#     parser.add_argument('--yolo_model_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Models\yolov8-demo-model\train\weights\best.pt', help='Path to YOLO model')
-#     parser.add_argument('--output_base_dir', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Usage\soccer-demo\outputs', help='Base directory for outputs')
-
-#     # Parse the arguments
-#     args = parser.parse_args()
-
-#     # 1. Setup ----------------------------------------------------------------
-#     # Update the config dictionary with arguments from the command line
-#     config = {
-#         'input_video_path': args.input_video_path,
-#         'player_labels': args.player_labels,
-#         'ball_labels': args.ball_labels,
-#         'n_classes': args.n_classes,
-#         'input_layout_image': args.input_layout_image,
-#         'yolo_model_path': args.yolo_model_path,
-#         'output_base_dir': args.output_base_dir,
-#     }
-    
-#     config = create_output_dirs(config)
-    
-#     object_detector = ObjectDetector(config)
-    
-#     # CSV writer
-#     csv_writer = CsvWriter(config)
-    
-#     # TXT Report Writer
-#     report_writer = ReportWriter(config)
-    
-#     # HSV Ranges setup
-#     hsv_setup = HSVRangeSetup(config)
-#     teams_dict = hsv_setup.setup_hsv_ranges(object_detector)
-
-#     # Include the paths to the heatmap images and videos
-#     config = create_heatmaps_dirs(config, teams_dict)
-
-#     # H Matrix setup
-#     homography_setup = HomographySetup(config)
-#     H = homography_setup.compute_homography_matrix()
-    
-#     # Create layout registration object
-#     layout_projector = LayoutProjector(config, H, teams_dict)
-    
-#     #2. Analysis stage --------------------------------------------------------
-#     # Goal polygon setup
-#     goal_polygon = GoalPolygon(config, teams_dict)
-    
-#     # Team players list
-#     team_players_list = [TeamPlayer(config, key, teams_dict) for key in teams_dict.keys()]
-    
-#     # Create ball object
-#     ball_object = Ball(config)
-    
-#     # Create video processing object and process video
-#     processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector, csv_writer, report_writer)
-#     processor.process_video()
+    # Create video processing object and process video
+    processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector, csv_writer, report_writer)
+    processor.send_processed_video_frames()
