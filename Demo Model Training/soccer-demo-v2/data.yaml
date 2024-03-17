@@ -1,0 +1,7 @@
+path: /Documents/GitHub/soccer-players-analysis/Demo Model Training
+train: ./soccer-demo-v2/train/images
+val: ./soccer-demo-v2/valid/images
+test: ./soccer-demo-v2/test/images
+
+nc: 4
+names: ['audience', 'ball', 'player-blue', 'player-red']

@@ -990,11 +990,6 @@ class LayoutProjector:
             cv2.putText(frame, time_str, (time_text_x, time_text_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
     
         return frame
-    
-async def send_frame_async(conn, processed_frame, drawn_layout, overlay_heatmaps_dict):
-    data = pickle.dumps((processed_frame, drawn_layout))
-    message = struct.pack("Q", len(data)) + data
-    await conn.sendall(message)
 
 # Video processor class =======================================================
 class VideoProcessor:
@@ -1095,19 +1090,33 @@ class VideoProcessor:
         # Save final heatmaps
         for key, heatmap in overlay_heatmaps_dict.items():
             cv2.imwrite(config['output_image_heatmaps'][key], heatmap)
-        
+
     def send_processed_video_frames(self, host='0.0.0.0', port=8080):
+        """
+        Sends processed video frames over a network connection.
+
+        Args:
+            host (str, optional): The IP address or hostname to bind the server socket to. Defaults to '0.0.0.0'.
+            port (int, optional): The port number to bind the server socket to. Defaults to 8080.
+        """
+        # Set up server socket for receiving client connections
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((host, port))
         server_socket.listen()
         print(f"Listening for client connections on {host}:{port}")
 
+        # Accept client connection
         conn, addr = server_socket.accept()
         print(f"Connection from {addr}")
 
-        cap = cv2.VideoCapture(self.config['input_video_path'])
-    
+        # Open video capture
+        input_video_path = self.config['input_video_path']
+        if input_video_path == 0 or (isinstance(input_video_path, str) and input_video_path.isdigit()):
+            cap = cv2.VideoCapture(int(input_video_path))
+        else:
+            cap = cv2.VideoCapture(input_video_path)
+        
         # Check if video opened successfully
         if not cap.isOpened():
             print("Error opening video stream or file")
@@ -1119,74 +1128,67 @@ class VideoProcessor:
         self.fps = cap.get(cv2.CAP_PROP_FPS)
         self.layout_projector.fps = self.fps
         
-        # Define the codec and create VideoWriter object
-        self.fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # 'mp4v' for .mp4 files
+        # Define the codec and create VideoWriter object for output video
+        self.fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(self.config['output_video_path'], self.fourcc, self.fps, (frame_width, frame_height))
         heatmap_outs_dict, layout_out_writer = self.initialize_heatmap_layout_output_writers()
+
+        # Handling unknown total frame count for live camera feed
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0 else float('inf')
         
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        with tqdm(total=total_frames, desc="Processing video frames") as pbar:
+        # Process video frames
+        with tqdm(total=None if total_frames == float('inf') else total_frames, desc="Processing video frames") as pbar:
             while cap.isOpened():
                 ret, frame = cap.read()
                 if ret:
                     processed_frame, drawn_layout, overlay_heatmaps_dict = self.process_frame(frame)
                     
+                    # Write processed frame and layout to output video
                     out.write(processed_frame)
                     layout_out_writer.write(drawn_layout)    
                     
+                    # Write overlay heatmaps to respective output videos
                     for key, heatmap in overlay_heatmaps_dict.items():
                         if heatmap.dtype != np.uint8:
                             heatmap = cv2.convertScaleAbs(heatmap)
                         heatmap_outs_dict[key].write(heatmap)
                     
-                    small_processed_frame = cv2.resize(processed_frame, (0, 0), fx=0.5, fy=0.5)
-                    small_drawn_layout = cv2.resize(drawn_layout, (0, 0), fx=0.5, fy=0.5)
+                    # Resize frames and heatmaps for network transmission
+                    fx, fy = 0.75, 0.75
+                    processed_frame = cv2.resize(processed_frame, (0, 0), fx=fx, fy=fy)
+                    drawn_layout = cv2.resize(drawn_layout, (0, 0), fx=fx, fy=fy)
+                    overlay_heatmaps_dict = {key: cv2.resize(heatmap, (0, 0), fx=fx, fy=fy) for key, heatmap in overlay_heatmaps_dict.items()}
+                    
+                    # Encode frames as JPEG and send over network connection
+                    JPEG_QUALITY = 90
+                    _, jpeg_processed_frame = cv2.imencode('.jpg', processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+                    _, jpeg_drawn_layout = cv2.imencode('.jpg', drawn_layout, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+                    _, jpeg_heatmap_1 = cv2.imencode('.jpg', overlay_heatmaps_dict['a'], [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+                    _, jpeg_heatmap_2 = cv2.imencode('.jpg', overlay_heatmaps_dict['b'], [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
 
-                    heatmap_1 = overlay_heatmaps_dict['a']
-                    heatmap_2 = overlay_heatmaps_dict['b']
-
-                    small_heatmap_1 = cv2.resize(heatmap_1, (0, 0), fx=0.5, fy=0.5)
-                    small_heatmap_2 = cv2.resize(heatmap_2, (0, 0), fx=0.5, fy=0.5)
-                    _, jpeg_processed_frame = cv2.imencode('.jpg', small_processed_frame)
-                    _, jpeg_drawn_layout = cv2.imencode('.jpg', small_drawn_layout)
-                    _, jpeg_heatmap_1 = cv2.imencode('.jpg', small_heatmap_1)
-                    _, jpeg_heatmap_2 = cv2.imencode('.jpg', small_heatmap_2)
-
-                    processed_frame_bytes = jpeg_processed_frame.tobytes()
-                    drawn_layout_bytes = jpeg_drawn_layout.tobytes()
-                    heatmap_1_bytes = jpeg_heatmap_1.tobytes()
-                    heatmap_2_bytes = jpeg_heatmap_2.tobytes()
-
-                    # data = 
-
-                    # Packing the processed_frame, drawn_layout, and images in overlay_heatmaps_dict
-                    start_time = time.time()
-                    data = pickle.dumps((small_processed_frame, small_drawn_layout, small_heatmap_1, small_heatmap_2))
+                    # Pack and send data over network connection
+                    data = pickle.dumps((jpeg_processed_frame, jpeg_drawn_layout, jpeg_heatmap_1, jpeg_heatmap_2))
                     message = struct.pack("Q", len(data)) + data
-                    # check size of message in bytes
-                    # print(f"Message size: {len(message):,} bytes")
                     conn.sendall(message)
-                    # print(f"Time to send frame: {time.time() - start_time}")
-    
-                    pbar.update(1)
 
+                    pbar.update(1)
                 else:
                     break
 
-    	# Release everything if job is finished
+        # Release resources
         cap.release()
         out.release()
         layout_out_writer.release()
+        conn.close()
         
-        for out_wirter in heatmap_outs_dict.values():
-            out_wirter.release()
+        for out_writer in heatmap_outs_dict.values():
+            out_writer.release()
         
         cv2.destroyAllWindows()
         
         # Save final heatmaps
         for key, heatmap in overlay_heatmaps_dict.items():
-            cv2.imwrite(config['output_image_heatmaps'][key], heatmap)
+            cv2.imwrite(self.config['output_image_heatmaps'][key], heatmap)
     
     def initialize_heatmap_layout_output_writers(self):
         heatmap_outs_dict = {}
@@ -1207,13 +1209,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process video analysis with custom configuration.')
 
     # Adding arguments
-    parser.add_argument('--input_video_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\demo\demo_v2_sliced.mp4', help='Path to input video')
+    parser.add_argument('--input_video_path', type=str, default='../../../Datasets/demo/demo_v2_sliced.mp4', help='Path to input video')
     parser.add_argument('--player_labels', nargs='+', type=int, default=[2, 3], help='Player labels')
     parser.add_argument('--ball_labels', nargs='+', type=int, default=[1], help='Ball labels')
     parser.add_argument('--n_classes', type=int, default=2, help='Number of classes')
-    parser.add_argument('--input_layout_image', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\soccer field layout\soccer_field_layout.png', help='Path to input layout image')
-    parser.add_argument('--yolo_model_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Models\yolov8-demo-model\train\weights\best_nano.pt', help='Path to YOLO model')
-    parser.add_argument('--output_base_dir', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Usage\soccer-demo\outputs\demo_v2_sliced', help='Base directory for outputs')
+    parser.add_argument('--input_layout_image', type=str, default='../../../Datasets/soccer field layout/soccer_field_layout.png', help='Path to input layout image')
+    parser.add_argument('--yolo_model_path', type=str, default='../../../Models/yolov8-demo-model/train/weights/nano/best.engine', help='Path to YOLO model')
+    parser.add_argument('--output_base_dir', type=str, default='../outputs', help='Base directory for outputs')
 
     # Parse the arguments
     args = parser.parse_args()
