@@ -17,6 +17,7 @@ import struct
 import pickle
 import asyncio
 import sqlite3
+import datetime
 
 # Utility functions ===========================================================
 def create_output_dirs(config):
@@ -78,19 +79,29 @@ class DatabaseWriter:
     def connect_db(self):
         """
         Connects to the SQLite database, creating it if it doesn't exist.
-        """
+        """ 
         self.conn = sqlite3.connect(self.db_path)
         self.cursor = self.conn.cursor()
-        # Modify the table creation query to include separate columns
-        self.cursor.execute('''CREATE TABLE IF NOT EXISTS analytics (
+        # Check if the 'analytics' table exists
+        self.cursor = self.conn.cursor()
+        
+        # Drop the existing 'analytics' table if it exists
+        self.cursor.execute("DROP TABLE IF EXISTS analytics")
+        
+        # Create a new 'analytics' table with the desired schema
+        self.cursor.execute('''CREATE TABLE analytics (
                                 frame INTEGER,
                                 a TEXT,
                                 b TEXT,
                                 ball TEXT,
-                                ball_possession TEXT)''')
+                                ball_possession TEXT,
+                                goals_team_a INTEGER,
+                                goals_team_b INTEGER,
+                                timestamp TEXT)''')
+        
         self.conn.commit()
 
-    def update_db(self, analytics_dict, frame_number_p):
+    def update_db(self, analytics_dict, frame_number_p, scores_dict):
         """
         Updates the SQLite database by inserting a new row with the latest data.
         """
@@ -101,6 +112,7 @@ class DatabaseWriter:
             return obj  # Return the object as is if it's not a NumPy array
 
         # Extract data for each column, ensuring any NumPy arrays are converted to lists
+        current_timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         a_str = json.dumps([convert_to_list(item) for item in analytics_dict.get('a', [])])
         b_str = json.dumps([convert_to_list(item) for item in analytics_dict.get('b', [])])
         ball_str = json.dumps([convert_to_list(item) for item in analytics_dict.get('ball', [])])
@@ -108,11 +120,13 @@ class DatabaseWriter:
         
         # Assume frame_number is calculated or obtained elsewhere
         frame_number = frame_number_p  # Example to derive frame_number, adjust as necessary
-        
+        # Get the goal counts for each team from the scores_dict
+        goals_team_a = scores_dict.get('a', 0)
+        goals_team_b = scores_dict.get('b', 0)
         # Insert the data into the database
-        self.cursor.execute('''INSERT INTO analytics (frame, a, b, ball, ball_possession)
-                            VALUES (?, ?, ?, ?, ?)''',
-                            (frame_number, a_str, b_str, ball_str, ball_possession_str))
+        self.cursor.execute('''INSERT INTO analytics (frame, a, b, ball, ball_possession, goals_team_a, goals_team_b, timestamp)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                            (frame_number, a_str, b_str, ball_str, ball_possession_str, goals_team_a, goals_team_b, current_timestamp))
         self.conn.commit()
 
     def close_db(self):
@@ -1031,7 +1045,7 @@ class VideoProcessor:
         drawn_layout, overlay_heatmaps_dict = self.layout_projector.update_draw_layout_dict(self.team_players_list, self.ball_object)
         frame = self.layout_projector.update_draw_possession_time(frame)
         
-        self.database_writer.update_db(self.layout_projector.layout_dict, self.frame_count)
+        self.database_writer.update_db(self.layout_projector.layout_dict, self.frame_count, self.goal_polygon.scores_dict)
         
         
         self.report_writer.update_report(self.goal_polygon.scores_dict, self.layout_projector.ball_poss_dict)
