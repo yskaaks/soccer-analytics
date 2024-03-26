@@ -16,6 +16,7 @@ import socket
 import struct
 import pickle
 import asyncio
+import sqlite3
 
 # Utility functions ===========================================================
 def create_output_dirs(config):
@@ -39,6 +40,7 @@ def create_output_dirs(config):
     config['output_video_path'] = os.path.join(output_video_dir, 'scores_video.mp4')
     config['layout_video_path'] = os.path.join(output_video_dir, 'layout_video.mp4')
     config['output_csv'] = os.path.join(output_video_dir, 'soccer_analytics.csv')
+    config['output_db'] = os.path.join(output_video_dir, 'soccer_analytics.sqlite')
     config['output_report'] = os.path.join(output_video_dir, 'soccer_analytics_report.json')
     
     
@@ -62,61 +64,63 @@ def create_heatmaps_dirs(config, teams_dict):
         
     return config
 
-# CSV Writer class ============================================================
-class CsvWriter:
+
+class DatabaseWriter:
     def __init__(self, config):
         """
-        Initializes the CsvWriter object, setting up the file path.
+        Initializes the DatabaseWriter object, setting up the database connection.
 
-        :param config: Configuration dictionary containing 'output_csv' as the path to the CSV file.
+        :param config: Configuration dictionary containing 'output_db' as the path to the SQLite database.
         """
-        self.file_path = config['output_csv']
-        # Ensure the CSV starts fresh when the object is created
-        self.ensure_fresh_start()
+        self.db_path = config['output_db']  # Set the path for the SQLite database
+        self.connect_db()  # Connect to the SQLite database
 
-    def ensure_fresh_start(self):
+    def connect_db(self):
         """
-        Removes existing CSV file if it exists to start fresh.
+        Connects to the SQLite database, creating it if it doesn't exist.
         """
-        if os.path.isfile(self.file_path):
-            os.remove(self.file_path)
+        self.conn = sqlite3.connect(self.db_path)
+        self.cursor = self.conn.cursor()
+        # Modify the table creation query to include separate columns
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS analytics (
+                                frame INTEGER,
+                                a TEXT,
+                                b TEXT,
+                                ball TEXT,
+                                ball_possession TEXT)''')
+        self.conn.commit()
 
-    def update_csv(self, analytics_dict):
+    def update_db(self, analytics_dict, frame_number_p):
         """
-        Updates the CSV file by appending a new row with the latest data.
-
-        :param analytics_dict: Dictionary with analytics' names as keys and their values as lists.
+        Updates the SQLite database by inserting a new row with the latest data.
         """
-        # Automatically determine the frame number based on the length of any list in the analytics_dict
-        frame_number = len(next(iter(analytics_dict.values()))) if analytics_dict else 1
+        # Check and convert only if the object is a NumPy array
+        def convert_to_list(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj  # Return the object as is if it's not a NumPy array
 
-        # Check if this is the first update and initialize the file with headers
-        if not os.path.isfile(self.file_path) or os.stat(self.file_path).st_size == 0:
-            self.initialize_csv(analytics_dict)
+        # Extract data for each column, ensuring any NumPy arrays are converted to lists
+        a_str = json.dumps([convert_to_list(item) for item in analytics_dict.get('a', [])])
+        b_str = json.dumps([convert_to_list(item) for item in analytics_dict.get('b', [])])
+        ball_str = json.dumps([convert_to_list(item) for item in analytics_dict.get('ball', [])])
+        ball_possession_str = json.dumps([convert_to_list(item) for item in analytics_dict.get('ball_possession', [])])
         
-        # Append the latest data for the current frame
-        self.append_latest_data(frame_number, analytics_dict)
+        # Assume frame_number is calculated or obtained elsewhere
+        frame_number = frame_number_p  # Example to derive frame_number, adjust as necessary
+        
+        # Insert the data into the database
+        self.cursor.execute('''INSERT INTO analytics (frame, a, b, ball, ball_possession)
+                            VALUES (?, ?, ?, ?, ?)''',
+                            (frame_number, a_str, b_str, ball_str, ball_possession_str))
+        self.conn.commit()
 
-    def initialize_csv(self, analytics_dict):
+    def close_db(self):
         """
-        Initializes the CSV file with headers based on the analytics_dict keys.
+        Closes the database connection.
         """
-        with open(self.file_path, mode='w', newline='') as file:
-            writer = csv.writer(file)
-            # Initialize header with 'frame' as the first column, followed by analytics names
-            headers = ['frame'] + list(analytics_dict.keys())
-            writer.writerow(headers)
-
-    def append_latest_data(self, frame_number, analytics_dict):
-        """
-        Appends the latest data for the current frame to the CSV file.
-        """
-        with open(self.file_path, mode='a', newline='') as file:
-            writer = csv.writer(file)
-            # Prepare the row data starting with the frame number
-            row_data = [frame_number] + [analytics_dict[analytic][-1] if analytics_dict[analytic] else None for analytic in analytics_dict]
-            writer.writerow(row_data)
-            
+        self.conn.close()
+           
 # TXT writer for final analytics report =======================================
 class ReportWriter:
     def __init__(self, config):
@@ -808,7 +812,10 @@ class LayoutProjector:
         self.H = H
         self.layout_dict, self.ball_poss_dict = self.initialize_layout_dict(teams_dict)
         self.fps = 0
-        
+    
+    def reset_layout_dict(self):
+        # Reset layout_dict to its initial state
+        self.layout_dict = {"a": [], "b": [], "ball": [], "ball_possession": []}
     def initialize_heatmaps_dict(self, teams_dict):
         heatmap_zeros = np.zeros((self.layout_image.shape[0], self.layout_image.shape[1]), dtype=np.float32)
         heatmaps_dict = {teams_dict[key]['team_letter']: heatmap_zeros.copy() for key in teams_dict.keys()}
@@ -993,8 +1000,8 @@ class LayoutProjector:
 
 # Video processor class =======================================================
 class VideoProcessor:
-    def __init__(self, config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector, csv_writer, report_writer):
-        self.csv_writer = csv_writer
+    def __init__(self, config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector, database_writer, report_writer):
+        self.database_writer = database_writer
         self.report_writer = report_writer
         
         self.config = config
@@ -1006,8 +1013,11 @@ class VideoProcessor:
         self.layout_projector = layout_projector
         
         self.fps = 0
-        
+        self.frame_count = 0
+    
     def process_frame(self, frame):
+        self.frame_count += 1
+        self.layout_projector.reset_layout_dict()
         detected_objects = self.object_detector.detect(frame)
         
         self.goal_polygon.draw_polygon_on_frame(frame)
@@ -1021,7 +1031,7 @@ class VideoProcessor:
         drawn_layout, overlay_heatmaps_dict = self.layout_projector.update_draw_layout_dict(self.team_players_list, self.ball_object)
         frame = self.layout_projector.update_draw_possession_time(frame)
         
-        self.csv_writer.update_csv(self.layout_projector.layout_dict)
+        self.database_writer.update_db(self.layout_projector.layout_dict, self.frame_count)
         
         
         self.report_writer.update_report(self.goal_polygon.scores_dict, self.layout_projector.ball_poss_dict)
@@ -1209,13 +1219,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process video analysis with custom configuration.')
 
     # Adding arguments
-    parser.add_argument('--input_video_path', type=str, default='../../../Datasets/demo/demo_v2_sliced.mp4', help='Path to input video')
+    parser.add_argument('--input_video_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\demo\demo_v2_sliced.mp4', help='Path to input video')
     parser.add_argument('--player_labels', nargs='+', type=int, default=[2, 3], help='Player labels')
     parser.add_argument('--ball_labels', nargs='+', type=int, default=[1], help='Ball labels')
     parser.add_argument('--n_classes', type=int, default=2, help='Number of classes')
-    parser.add_argument('--input_layout_image', type=str, default='../../../Datasets/soccer field layout/soccer_field_layout.png', help='Path to input layout image')
-    parser.add_argument('--yolo_model_path', type=str, default='../../../Models/yolov8-demo-model/train/weights/nano/best.engine', help='Path to YOLO model')
-    parser.add_argument('--output_base_dir', type=str, default='../outputs', help='Base directory for outputs')
+    parser.add_argument('--input_layout_image', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\soccer field layout\soccer_field_layout.png', help='Path to input layout image')
+    parser.add_argument('--yolo_model_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Models\yolov8-demo-model\train\weights\nano\best.pt', help='Path to YOLO model')
+    parser.add_argument('--output_base_dir', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Usage\soccer-demo\outputs', help='Base directory for outputs')
 
     # Parse the arguments
     args = parser.parse_args()
@@ -1237,7 +1247,7 @@ if __name__ == "__main__":
     object_detector = ObjectDetector(config)
     
     # CSV writer
-    csv_writer = CsvWriter(config)
+    database_writer = DatabaseWriter(config)
     
     # TXT Report Writer
     report_writer = ReportWriter(config)
@@ -1267,5 +1277,5 @@ if __name__ == "__main__":
     ball_object = Ball(config)
     
     # Create video processing object and process video
-    processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector, csv_writer, report_writer)
+    processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector, database_writer, report_writer)
     processor.send_processed_video_frames()
