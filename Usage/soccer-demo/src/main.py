@@ -17,6 +17,8 @@ import struct
 import pickle
 import asyncio
 import sqlite3
+import websockets
+import base64
 import datetime
 
 # Utility functions ===========================================================
@@ -1115,7 +1117,7 @@ class VideoProcessor:
         for key, heatmap in overlay_heatmaps_dict.items():
             cv2.imwrite(config['output_image_heatmaps'][key], heatmap)
 
-    def send_processed_video_frames(self, host='0.0.0.0', port=8080):
+    async def send_processed_video_frames(self, websocket):
         """
         Sends processed video frames over a network connection.
 
@@ -1123,16 +1125,7 @@ class VideoProcessor:
             host (str, optional): The IP address or hostname to bind the server socket to. Defaults to '0.0.0.0'.
             port (int, optional): The port number to bind the server socket to. Defaults to 8080.
         """
-        # Set up server socket for receiving client connections
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind((host, port))
-        server_socket.listen()
-        print(f"Listening for client connections on {host}:{port}")
 
-        # Accept client connection
-        conn, addr = server_socket.accept()
-        print(f"Connection from {addr}")
 
         # Open video capture
         input_video_path = self.config['input_video_path']
@@ -1189,11 +1182,16 @@ class VideoProcessor:
                     _, jpeg_drawn_layout = cv2.imencode('.jpg', drawn_layout, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
                     _, jpeg_heatmap_1 = cv2.imencode('.jpg', overlay_heatmaps_dict['a'], [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
                     _, jpeg_heatmap_2 = cv2.imencode('.jpg', overlay_heatmaps_dict['b'], [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+                    
 
+                    combined_data = f"{base64.b64encode(jpeg_processed_frame).decode('utf-8')};{base64.b64encode(jpeg_drawn_layout).decode('utf-8')};{base64.b64encode(jpeg_heatmap_1).decode('utf-8')};{base64.b64encode(jpeg_heatmap_2).decode('utf-8')}"
                     # Pack and send data over network connection
-                    data = pickle.dumps((jpeg_processed_frame, jpeg_drawn_layout, jpeg_heatmap_1, jpeg_heatmap_2))
-                    message = struct.pack("Q", len(data)) + data
-                    conn.sendall(message)
+                    
+                    try:
+                        await websocket.send(combined_data)
+                    except websockets.exceptions.ConnectionClosed:
+                        print("WebSocket connection closed. Stopping stream.")
+                        break
 
                     pbar.update(1)
                 else:
@@ -1203,7 +1201,6 @@ class VideoProcessor:
         cap.release()
         out.release()
         layout_out_writer.release()
-        conn.close()
         
         for out_writer in heatmap_outs_dict.values():
             out_writer.release()
@@ -1213,7 +1210,12 @@ class VideoProcessor:
         # Save final heatmaps
         for key, heatmap in overlay_heatmaps_dict.items():
             cv2.imwrite(self.config['output_image_heatmaps'][key], heatmap)
-    
+    async def main(self):
+        async with websockets.serve(self.send_processed_video_frames, "localhost", 3000):
+            await asyncio.Future()
+
+
+
     def initialize_heatmap_layout_output_writers(self):
         heatmap_outs_dict = {}
         
@@ -1226,7 +1228,6 @@ class VideoProcessor:
         layout_out_writer = cv2.VideoWriter(self.config['layout_video_path'], self.fourcc, self.fps, (layout_width, layout_height))
         
         return heatmap_outs_dict, layout_out_writer
-
 # Main function ===============================================================
 if __name__ == "__main__":
     # Initialize the parser
@@ -1240,7 +1241,6 @@ if __name__ == "__main__":
     parser.add_argument('--input_layout_image', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Datasets\soccer field layout\soccer_field_layout.png', help='Path to input layout image')
     parser.add_argument('--yolo_model_path', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Models\yolov8-demo-model\train\weights\nano\best.pt', help='Path to YOLO model')
     parser.add_argument('--output_base_dir', type=str, default=r'C:\Users\shysk\Documents\soccer-analytics\Usage\soccer-demo\outputs', help='Base directory for outputs')
-
     # Parse the arguments
     args = parser.parse_args()
 
@@ -1292,4 +1292,5 @@ if __name__ == "__main__":
     
     # Create video processing object and process video
     processor = VideoProcessor(config, object_detector, goal_polygon, team_players_list, ball_object, layout_projector, database_writer, report_writer)
-    processor.send_processed_video_frames()
+    # processor.send_processed_video_frames()
+    asyncio.run(processor.main())
